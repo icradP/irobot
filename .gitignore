@@ -1,2 +1,7 @@
 depends/
 .vscode/
+robot_core/target/
+robot_mcp_server/target/
+Cargo.lock
+**/Cargo.lock
+**/target/
