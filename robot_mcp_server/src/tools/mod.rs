@@ -18,15 +18,14 @@ pub struct AppState {
 pub mod chat;
 pub mod echo;
 pub mod get_weather;
-pub mod memory;
 pub mod profile;
 pub mod sum;
 pub mod get_current_datetime;
 
+
 pub use chat::ChatRequest;
 pub use echo::EchoRequest;
 pub use get_weather::GetWeatherRequest;
-pub use memory::{MemoryRecallRequest, MemorySaveRequest};
 pub use profile::{ProfileGetRequest, ProfileUpdateRequest};
 pub use sum::SumRequest;
 pub use get_current_datetime::GetCurrentDatetimeRequest;
@@ -43,8 +42,6 @@ pub fn all_entries() -> Vec<ToolEntry> {
     vec![
         echo::tool(),
         sum::tool(),
-        memory::save_tool(),
-        memory::recall_tool(),
         profile::update_tool(),
         profile::get_tool(),
         chat::tool(),

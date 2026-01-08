@@ -19,7 +19,7 @@ macro_rules! register_handlers {
                 $core.add_output_handler(
                     $crate::core::router::HandlerId::of::<$handler_type>(),
                     Box::new($output),
-                );
+                ).await;
                 
                 $core.route().add_source_route::<$handler_type>(vec![
                     $($crate::core::router::HandlerId::of::<$route>()),+

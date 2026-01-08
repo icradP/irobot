@@ -9,29 +9,32 @@ use std::sync::{Arc, Mutex};
 use tracing_subscriber::{self, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 mod tools;
 use crate::tools::AppState;
+mod external;
 
 elicit_safe!(
     tools::EchoRequest,
     tools::SumRequest,
-    tools::MemorySaveRequest,
-    tools::MemoryRecallRequest,
     tools::ProfileUpdateRequest,
     tools::ProfileGetRequest,
     tools::ChatRequest,
     tools::GetWeatherRequest,
     tools::GetCurrentDatetimeRequest,
+    external::BridgeRaw,
 );
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RobotService {
     state: Arc<Mutex<tools::AppState>>,
+    externals: Arc<external::ExternalManager>,
 }
 
 impl RobotService {
-    pub fn new() -> Self {
-        Self {
+    pub async fn new() -> anyhow::Result<Self> {
+        let externals = external::ExternalManager::new_from_config().await?;
+        Ok(Self {
             state: Arc::new(Mutex::new(AppState::default())),
-        }
+            externals: Arc::new(externals),
+        })
     }
 }
 
@@ -49,11 +52,16 @@ impl ServerHandler for RobotService {
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult {
-            tools: tools::all_tools(),
-            meta: None,
-            next_cursor: None,
-        })
+        let mut list = tools::all_tools();
+        match self.externals.list_tools().await {
+            Ok(mut ext) => {
+                list.append(&mut ext);
+            }
+            Err(e) => {
+                tracing::warn!("List external tools failed: {}", e);
+            }
+        }
+        Ok(ListToolsResult { tools: list, meta: None, next_cursor: None })
     }
 
     async fn call_tool(
@@ -61,13 +69,24 @@ impl ServerHandler for RobotService {
         request: CallToolRequestParam,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        tools::dispatch(
-            &request.name,
-            request.arguments.map(|v| v.into()),
-            context,
-            self.state.clone(),
-        )
-        .await
+        if external::parse_external_name(&request.name).is_some() {
+            match self
+                .externals
+                .call_external(&request.name, request.arguments.map(|v| v.into()), context.clone())
+                .await
+            {
+                Ok(res) => Ok(res),
+                Err(e) => Err(ErrorData::internal_error(format!("外部调用失败: {}", e), None)),
+            }
+        } else {
+            tools::dispatch(
+                &request.name,
+                request.arguments.map(|v| v.into()),
+                context,
+                self.state.clone(),
+            )
+            .await
+        }
     }
 }
 
@@ -94,15 +113,19 @@ async fn main() -> Result<()> {
         tracing::info!("Accepted connection from: {}", peer_addr);
 
         tokio::spawn(async move {
-            let service = RobotService::new();
-            match service.serve(stream).await {
-                Ok(server) => {
-                    tracing::info!("Service initialized for {}", peer_addr);
-                    if let Err(e) = server.waiting().await {
-                        tracing::error!("Service error for {}: {:?}", peer_addr, e);
+            match RobotService::new().await {
+                Ok(service) => match service.serve(stream).await {
+                    Ok(server) => {
+                        tracing::info!("Service initialized for {}", peer_addr);
+                        if let Err(e) = server.waiting().await {
+                            tracing::error!("Service error for {}: {:?}", peer_addr, e);
+                        }
+                        tracing::info!("Service closed for {}", peer_addr);
                     }
-                    tracing::info!("Service closed for {}", peer_addr);
-                }
+                    Err(e) => {
+                        tracing::error!("Service run error for {}: {:?}", peer_addr, e);
+                    }
+                },
                 Err(e) => {
                     tracing::error!("Service initialization error for {}: {:?}", peer_addr, e);
                 }

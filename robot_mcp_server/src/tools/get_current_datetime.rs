@@ -37,7 +37,6 @@ pub async fn handle(
     _request: Option<serde_json::Value>,
     _context: RequestContext<RoleServer>,
 ) -> Result<CallToolResult, ErrorData> {
-    // 忽略请求参数，直接返回当前时间
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     Ok(CallToolResult::success(vec![Content::text(now)]))
 }

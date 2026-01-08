@@ -163,7 +163,7 @@ impl ParameterResolver for LlmParameterResolver {
         } else {
             s
         };
-        let mut v: serde_json::Value = serde_json::from_str(json_slice).map_err(|e| {
+        let v: serde_json::Value = serde_json::from_str(json_slice).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to parse JSON from LLM output: '{}'. Error: {}",
                 json_slice,
@@ -171,33 +171,33 @@ impl ParameterResolver for LlmParameterResolver {
             )
         })?;
 
-        // Validate required fields - if any are null, it means LLM couldn't extract them
-        if let Some(obj) = v.as_object() {
-            let mut missing_fields = Vec::new();
-            for field in &required_fields {
-                if let Some(val) = obj.get(field) {
-                    if val.is_null() {
-                        missing_fields.push(field.clone());
-                    }
-                } else {
-                    missing_fields.push(field.clone());
-                }
-            }
+        // // Validate required fields - if any are null, it means LLM couldn't extract them
+        // if let Some(obj) = v.as_object() {
+        //     let mut missing_fields = Vec::new();
+        //     for field in &required_fields {
+        //         if let Some(val) = obj.get(field) {
+        //             if val.is_null() {
+        //                 missing_fields.push(field.clone());
+        //             }
+        //         } else {
+        //             missing_fields.push(field.clone());
+        //         }
+        //     }
 
-            if !missing_fields.is_empty() {
-                tracing::warn!(
-                    "LlmParameterResolver: required fields {:?} are missing or null. User input was: '{}'. Will return null for these fields to trigger elicit.",
-                    missing_fields,
-                    input_text
-                );
-                // Set missing required fields to null so the tool can trigger elicit
-                if let Some(obj) = v.as_object_mut() {
-                    for field in missing_fields {
-                        obj.insert(field, serde_json::Value::Null);
-                    }
-                }
-            }
-        }
+        //     if !missing_fields.is_empty() {
+        //         tracing::warn!(
+        //             "LlmParameterResolver: required fields {:?} are missing or null. User input was: '{}'. Will return null for these fields to trigger elicit.",
+        //             missing_fields,
+        //             input_text
+        //         );
+        //         // Set missing required fields to null so the tool can trigger elicit
+        //         if let Some(obj) = v.as_object_mut() {
+        //             for field in missing_fields {
+        //                 obj.insert(field, serde_json::Value::Null);
+        //             }
+        //         }
+        //     }
+        // }
         Ok(v)
     }
 }
@@ -241,76 +241,26 @@ impl WorkflowStep for RelationshipStep {
 #[async_trait]
 impl WorkflowStep for McpToolStep {
     async fn run(&self, ctx: &mut Context, mcp: &dyn MCPClient) -> anyhow::Result<StepResult> {
-        let resolved_args = self
+        let mut resolved_args = self
             .resolver
             .resolve(mcp, &self.name, &self.args, ctx)
             .await?;
-        let required_fields = mcp.required_fields(&self.name).await.unwrap_or_default();
-        let mut missing: Vec<String> = Vec::new();
-        if let Some(obj) = resolved_args.as_object() {
-            for f in &required_fields {
-                if let Some(v) = obj.get(f) {
-                    if v.is_null() {
-                        missing.push(f.clone());
-                    }
-                } else {
-                    missing.push(f.clone());
+        if let Some(session_id) = ctx.session_id.clone() {
+            if let Some(obj) = resolved_args.as_object_mut() {
+                if !obj.contains_key("session_id") {
+                    obj.insert("session_id".to_string(), serde_json::Value::String(session_id));
                 }
             }
-        } else if !required_fields.is_empty() {
-            missing = required_fields.clone();
         }
-        if !missing.is_empty() {
-            // First trigger MCP's elicitation to get the server-provided prompt
-            let preview = mcp.elicit_preview(&self.name).await.unwrap_or(None);
-            let content = if let Some(p) = preview {
-                p
-            } else {
-                // Fallback prompt if preview failed
-                let schema = mcp.tool_schema(&self.name).await.unwrap_or(None);
-                let mut parts: Vec<String> = Vec::new();
-                if let Some(s) = schema.as_ref() {
-                    if let Some(props) = s.get("properties").and_then(|v| v.as_object()) {
-                        for f in &missing {
-                            if let Some(desc) = props
-                                .get(f)
-                                .and_then(|p| p.get("description"))
-                                .and_then(|d| d.as_str())
-                            {
-                                parts.push(format!("{}（{}）", f, desc));
-                            } else {
-                                parts.push(f.clone());
-                            }
-                        }
-                    } else {
-                        parts = missing.clone();
-                    }
-                } else {
-                    parts = missing.clone();
-                }
-                let msg = if parts.len() == 1 {
-                    format!("请提供{}。可以直接发送文本或 JSON。", parts[0])
-                } else {
-                    format!("请补充以下必填参数：{}。可以直接发送文本或 JSON。", parts.join("，"))
-                };
-                serde_json::Value::String(msg)
-            };
-            let o = OutputEvent {
-                target: "default".into(),
-                source: "system".into(),
-                content,
-                style: crate::core::persona::OutputStyle::Neutral,
-            };
-            return Ok(StepResult {
-                next: false,
-                output: Some(o),
-            });
-        }
+        
+        // Removed client-side validation to allow MCP server to handle elicitation
+        
         let val = mcp.call(&self.name, resolved_args).await?;
         ctx.memory = serde_json::json!({"last_tool_result": val.clone()});
         let o = OutputEvent {
             target: "default".into(),
             source: "system".into(),
+            session_id: ctx.session_id.clone(),
             content: val,
             style: crate::core::persona::OutputStyle::Neutral,
         };

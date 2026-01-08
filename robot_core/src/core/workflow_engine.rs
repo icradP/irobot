@@ -27,7 +27,7 @@ impl WorkflowEngine {
         input_text: String,
         input_source: String,
     ) -> anyhow::Result<()> {
-        let mut ctx = crate::utils::Context::new(persona.clone(), input_text);
+        let mut ctx = crate::utils::Context::new(persona.clone(), input_text, None);
         for spec in plan.steps {
             info!("workflow step start: {:?}", spec);
             let step = build_step(&spec, self.resolver.clone());

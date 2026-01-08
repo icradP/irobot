@@ -1,17 +1,18 @@
 use crate::mcp::client::MCPClient;
 use crate::mcp::registry::ToolMeta;
-use crate::core::stdin_manager::StdinManager;
 use crate::llm::adapter::{ChatMessage, ChatRequest, LLMClient};
+use crate::utils::{OutputEvent, output_bus};
+use crate::core::persona::OutputStyle;
 use async_trait::async_trait;
-use rmcp::{
-    model::{
-        CallToolRequestParam, ClientCapabilities, ClientInfo, CreateElicitationRequestParam,
-        CreateElicitationResult, ElicitationAction, Implementation,
-    },
-    service::{RequestContext, RoleClient, RunningService},
-    ServiceExt,
-};
-use std::sync::{Arc, Mutex};
+    use rmcp::{
+        model::{
+            CallToolRequestParam, ClientCapabilities, ClientInfo, CreateElicitationRequestParam,
+            CreateElicitationResult, ElicitationAction, Implementation,
+        },
+        service::{RequestContext, RoleClient, RunningService},
+        ServiceExt,
+    };
+    use std::sync::{Arc, Mutex};
 
 pub struct RmcpStdIoClient {
     service: RunningService<RoleClient, RobotClientHandler>,
@@ -21,9 +22,10 @@ pub struct RmcpStdIoClient {
 pub struct RobotClientHandler {
     info: ClientInfo,
     shared: Arc<Mutex<SharedCtx>>,
-    stdin_manager: Arc<StdinManager>,
+
     llm: Arc<dyn LLMClient + Send + Sync>,
     model: String,
+    session_id: String,
 }
 
 #[derive(Default)]
@@ -46,12 +48,10 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
     ) -> impl std::future::Future<Output = Result<CreateElicitationResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            eprintln!("\n=== Server requesting input ===");
             let schema_str = serde_json::to_string_pretty(&request.requested_schema).unwrap_or_default();
             eprintln!("Message: {}", request.message);
             eprintln!("Schema: {}", schema_str);
             eprintln!("Please provide input (Natural language or JSON): ");
-            eprintln!("==============================\n");
 
             // Record elicitation prompt and schema for potential introspection
             {
@@ -63,15 +63,56 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                 );
             }
 
-            // Claim the next line from StdinManager
-            let input = self.stdin_manager.claim_next_line().await;
+            
+            // Use the session_id bound to this client
+            let sid = self.session_id.clone();
 
-            eprintln!("[elicit] Received raw input: {:?}", input);
+            // Emit output event to prompt the user
+            let output_event = OutputEvent {
+                target: "default".into(),
+                source: "mcp".into(),
+                session_id: Some(sid.clone()),
+                content: serde_json::json!({
+                    "message": request.message,
+                    "schema": request.requested_schema
+                }),
+                style: OutputStyle::Neutral,
+            };
+            
+            if let Err(e) = output_bus().send(output_event) {
+                eprintln!("[elicit] Failed to send output event: {}", e);
+            }
+
+            let mut rx = crate::utils::event_bus().subscribe();
+            let input_event = loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        let ev_sid = ev.session_id.clone().unwrap_or_else(|| ev.source.clone());
+                        if ev_sid == sid {
+                            break ev;
+                        }
+                    }
+                    Err(_) => {
+                        continue;
+                    }
+                }
+            };
+            let input = if let Some(s) = input_event
+                .payload
+                .get("content")
+                .and_then(|v| v.as_str())
+            {
+                s.to_string()
+            } else {
+                input_event.payload.to_string()
+            };
 
             // Try to parse as JSON first
             let parsed: serde_json::Value = match serde_json::from_str(&input) {
                 Ok(v) => {
                     eprintln!("[elicit] Successfully parsed as direct JSON: {:?}", v);
+                    // Mark event as consumed so core doesn't process it again
+                    crate::utils::mark_event_consumed(input_event.id);
                     v
                 }
                 Err(_) => {
@@ -126,7 +167,11 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                             };
 
                             match serde_json::from_str(json_str) {
-                                Ok(v) => v,
+                                Ok(v) => {
+                                    // Mark event as consumed so core doesn't process it again
+                                    crate::utils::mark_event_consumed(input_event.id);
+                                    v
+                                },
                                 Err(e) => {
                                     eprintln!("[elicit] ERROR: LLM produced invalid JSON: {}", e);
                                     return Err(rmcp::ErrorData::invalid_params(
@@ -158,24 +203,24 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
 
 impl RmcpStdIoClient {
     pub async fn new(
-        stdin_manager: Arc<StdinManager>,
         llm: Arc<dyn LLMClient + Send + Sync>,
         model: String,
+        session_id: String,
     ) -> anyhow::Result<Self> {
         // TCP connection to MCP server
         let server_addr =
             std::env::var("ROBOT_MCP_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:9001".to_string());
 
-        tracing::info!("Connecting to MCP server at: {}", server_addr);
+        tracing::info!("Connecting to MCP server at: {} for session {}", server_addr, session_id);
         let stream = tokio::net::TcpStream::connect(&server_addr).await?;
-        tracing::info!("Connected to MCP server");
+        tracing::info!("Connected to MCP server for session {}", session_id);
 
         let shared = Arc::new(Mutex::new(SharedCtx::default()));
         let client_info = ClientInfo {
             protocol_version: Default::default(),
             capabilities: ClientCapabilities::builder().enable_elicitation().build(),
             client_info: Implementation {
-                name: "robot-core-client".to_string(),
+                name: format!("robot-core-client-{}", session_id),
                 title: None,
                 version: "0.1.0".to_string(),
                 website_url: None,
@@ -185,9 +230,10 @@ impl RmcpStdIoClient {
         let handler = RobotClientHandler {
             info: client_info,
             shared: shared.clone(),
-            stdin_manager,
+
             llm,
             model,
+            session_id,
         };
         let service = handler.serve(stream).await?;
         Ok(Self { service, shared })
@@ -209,6 +255,9 @@ impl MCPClient for RmcpStdIoClient {
         } else {
             false
         };
+
+        // Note: We no longer need to capture session_id from args because this client 
+        // is already dedicated to a specific session_id.
 
         let arguments = if should_elicit {
             tracing::info!(
@@ -306,7 +355,7 @@ impl MCPClient for RmcpStdIoClient {
 #[cfg(test)]
 mod tests {
     use super::RmcpStdIoClient;
-    use crate::core::stdin_manager::StdinManager;
+
     use crate::mcp::client::MCPClient;
     use crate::mcp::registry::ToolMeta;
     use crate::llm::adapter::{LLMClient, ChatRequest, ChatResponse};
@@ -332,9 +381,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_and_call_echo() {
-        let stdin_manager = StdinManager::new();
         let mock_llm = Arc::new(MockLLM);
-        let client = RmcpStdIoClient::new(stdin_manager, mock_llm, "test-model".to_string()).await.unwrap();
+        let client = RmcpStdIoClient::new(mock_llm, "test-model".to_string()).await.unwrap();
         let tools: Vec<ToolMeta> = client.list_tools().await.unwrap();
         assert!(tools.iter().any(|t| t.name == "echo"));
         let args = serde_json::json!({"message": "hello"});

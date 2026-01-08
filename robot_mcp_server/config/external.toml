@@ -1,0 +1,4 @@
+externals = [
+  # "tcp://127.0.0.1:9002",            # 直连TCP示例（去掉前缀直接写 host:port 亦可）
+  "http://127.0.0.1:8901/mcp"          # HTTP MCP 服务示例
+]

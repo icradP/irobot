@@ -1,12 +1,12 @@
 use crate::core::input_handler::{InputHandler, SourceMetadata, SourceType, TypedInputHandler};
 use crate::core::output_handler::{OutputHandler, TypedOutputHandler};
+use crate::core::persona::OutputStyle;
 use crate::core::router::HandlerMarker;
 use crate::utils::{InputEvent, OutputEvent};
-use crate::core::stdin_manager::StdinManager;
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::{
-    extract::State,
+    extract::{State, Query},
     http::StatusCode,
     response::{Json, Sse},
     routing::{get, post},
@@ -37,6 +37,8 @@ impl HandlerMarker for WebHandler {
 pub struct WebMessage {
     pub content: String,
     pub timestamp: u64,
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -49,18 +51,16 @@ pub struct WebResponse {
 
 pub struct WebInputState {
     pub input_sender: mpsc::UnboundedSender<InputEvent>,
-    pub stdin_manager: Arc<StdinManager>,
 }
 
 pub struct WebOutputState {
     pub messages: Arc<Mutex<Vec<OutputEvent>>>,
-    pub subscribers: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<OutputEvent>>>>,
+    pub subscribers: Arc<Mutex<HashMap<String, HashMap<Uuid, mpsc::UnboundedSender<OutputEvent>>>>>,
 }
 
 pub struct WebInput {
     pub receiver: Arc<Mutex<mpsc::UnboundedReceiver<InputEvent>>>,
     pub server_handle: Option<tokio::task::JoinHandle<()>>,
-    pub stdin_manager: Arc<StdinManager>,
 }
 
 impl WebInput {
@@ -75,10 +75,9 @@ impl WebInput {
         }
     }
 
-    pub async fn new(port: u16, stdin_manager: Arc<StdinManager>) -> Result<Self> {
+    pub async fn new(port: u16) -> Result<Self> {
         let (input_sender, input_receiver) = mpsc::unbounded_channel();
-
-        let input_state = WebInputState { input_sender, stdin_manager: stdin_manager.clone() };
+        let input_state = WebInputState { input_sender };
 
         let app = Router::new()
             .route("/api/send", post(send_message))
@@ -103,7 +102,6 @@ impl WebInput {
         Ok(Self {
             receiver: Arc::new(Mutex::new(input_receiver)),
             server_handle: Some(server_handle),
-            stdin_manager,
         })
     }
 }
@@ -201,20 +199,21 @@ impl OutputHandler for WebOutput {
             }
         }
 
-        // Notify all subscribers
+        // Notify all subscribers (Broadcast to everyone)
         {
             let mut subscribers = self.state.subscribers.lock().await;
-            let mut to_remove = Vec::new();
-
-            for (id, sender) in subscribers.iter() {
-                if sender.send(event.clone()).is_err() {
-                    to_remove.push(*id);
+            
+            // Iterate over all session buckets
+            for map in subscribers.values_mut() {
+                let mut to_remove = Vec::new();
+                for (id, sender) in map.iter() {
+                    if sender.send(event.clone()).is_err() {
+                        to_remove.push(*id);
+                    }
                 }
-            }
-
-            // Remove disconnected subscribers
-            for id in to_remove {
-                subscribers.remove(&id);
+                for id in to_remove {
+                    map.remove(&id);
+                }
             }
         }
 
@@ -237,6 +236,7 @@ async fn send_message(
     let input_event = InputEvent {
         id: Uuid::new_v4(),
         source: "web".to_string(),
+        session_id: message.session_id.clone(),
         source_meta: Some(SourceMetadata {
             name: "web".to_string(),
             format_hint: "structured".to_string(),
@@ -249,9 +249,22 @@ async fn send_message(
         }),
     };
 
-    // Also submit raw content to StdinManager to satisfy any pending elicitation
-    state.stdin_manager.submit_line(message.content.clone()).await;
+    // Echo user message to output bus for broadcast
+    let output_echo = OutputEvent {
+        target: "all".to_string(),
+        source: "user".to_string(),
+        session_id: message.session_id.clone(),
+        content: serde_json::json!({
+            "type": "user_message",
+            "content": message.content,
+            "timestamp": message.timestamp
+        }),
+        style: OutputStyle::Neutral,
+    };
+    let _ = crate::utils::output_bus().send(output_echo);
 
+    // publish to global event bus for elicitation consumers
+    let _ = crate::utils::event_bus().send(input_event.clone());
     match state.input_sender.send(input_event) {
         Ok(_) => Ok(Json(WebResponse {
             success: true,
@@ -268,15 +281,25 @@ async fn get_messages(State(state): State<Arc<WebOutputState>>) -> Json<Vec<Outp
     Json(messages.clone())
 }
 
+#[derive(Deserialize)]
+struct SubscribeQuery {
+    session_id: Option<String>,
+}
+
 async fn subscribe_to_messages(
     State(state): State<Arc<WebOutputState>>,
+    Query(q): Query<SubscribeQuery>,
 ) -> Sse<impl Stream<Item = Result<axum::response::sse::Event, Infallible>>> {
     let subscriber_id = Uuid::new_v4();
     let (sender, receiver) = mpsc::unbounded_channel();
 
     {
         let mut subscribers = state.subscribers.lock().await;
-        subscribers.insert(subscriber_id, sender);
+        let sid = q.session_id.clone().unwrap_or_else(|| "web".to_string());
+        subscribers
+            .entry(sid)
+            .or_insert_with(HashMap::new)
+            .insert(subscriber_id, sender);
     }
 
     let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(receiver).map(|event| {
