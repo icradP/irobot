@@ -7,6 +7,7 @@
     --border-color: #4d4d4f;
     --user-msg-bg: #343541;
     --bot-msg-bg: #444654;
+    --other-user-msg-bg: #2d2d35;
     --accent-color: #10a37f;
     --hover-color: #2a2b32;
 }
@@ -141,6 +142,10 @@ body {
     background-color: var(--user-msg-bg);
 }
 
+.message.other-user-message {
+    background-color: var(--other-user-msg-bg);
+}
+
 .message-inner {
     max-width: 48rem;
     margin: 0 auto;
@@ -175,6 +180,11 @@ body {
 
 .bot-message .message-avatar {
     background-color: var(--accent-color);
+    color: white;
+}
+
+.other-user-message .message-avatar {
+    background-color: #8e44ad;
     color: white;
 }
 
@@ -336,7 +346,8 @@ textarea {
     font-size: 0.875rem;
 }
 
-.setting-item input {
+.setting-item input[type="text"],
+.setting-item input[type="number"] {
     width: 100%;
     padding: 0.5rem;
     background: var(--input-bg);
@@ -360,4 +371,21 @@ textarea {
 
 .save-btn:hover {
     background-color: #0e906f;
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+}
+
+.session-id-display {
+    font-family: monospace;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    word-break: break-all;
+    padding: 0.5rem;
+    background: var(--input-bg);
+    border-radius: 0.25rem;
 }

@@ -7,6 +7,9 @@ class ChatClient {
         this.outputPollingInterval = null;
         this.eventSource = null;
 
+        this.sessionId = null;
+        this.isBroadcastMode = false;
+
         this.initializeElements();
         this.bindEvents();
         this.loadSettings();
@@ -28,6 +31,8 @@ class ChatClient {
         this.outputPortInput = document.getElementById('outputPort');
         this.serverHostInput = document.getElementById('serverHost');
         this.saveSettingsBtn = document.getElementById('saveSettings');
+        this.broadcastModeInput = document.getElementById('broadcastMode');
+        this.sessionIdDisplay = document.getElementById('sessionIdDisplay');
         
         // Sidebar elements
         this.newChatBtn = document.getElementById('newChatBtn');
@@ -78,6 +83,8 @@ class ChatClient {
         // New Chat
         this.newChatBtn.addEventListener('click', () => {
             this.clearChat();
+            // Optionally regenerate session ID for a truly new chat?
+            // For now, keep session ID stable to simulate a user session.
         });
     }
 
@@ -88,22 +95,32 @@ class ChatClient {
             this.inputPort = parsed.inputPort || 8080;
             this.outputPort = parsed.outputPort || 8081;
             this.serverHost = parsed.serverHost || 'localhost';
-
-            this.inputPortInput.value = this.inputPort;
-            this.outputPortInput.value = this.outputPort;
-            this.serverHostInput.value = this.serverHost;
+            this.isBroadcastMode = parsed.isBroadcastMode || false;
+            // if (parsed.sessionId) {
+            //     this.sessionId = parsed.sessionId;
+            // }
         }
+        
+        // Update UI
+        this.inputPortInput.value = this.inputPort;
+        this.outputPortInput.value = this.outputPort;
+        this.serverHostInput.value = this.serverHost;
+        this.broadcastModeInput.checked = this.isBroadcastMode;
+        this.sessionIdDisplay.textContent = this.sessionId;
     }
 
     saveSettings() {
         this.inputPort = parseInt(this.inputPortInput.value) || 8080;
         this.outputPort = parseInt(this.outputPortInput.value) || 8081;
         this.serverHost = this.serverHostInput.value || 'localhost';
+        this.isBroadcastMode = this.broadcastModeInput.checked;
 
         const settings = {
             inputPort: this.inputPort,
             outputPort: this.outputPort,
-            serverHost: this.serverHost
+            serverHost: this.serverHost,
+            isBroadcastMode: this.isBroadcastMode,
+            // sessionId: this.sessionId // Don't save session ID to ensure fresh one on reload
         };
         localStorage.setItem('chatSettings', JSON.stringify(settings));
     }
@@ -161,6 +178,19 @@ class ChatClient {
                  throw e;
             }
 
+            // Create new session from backend
+            if (!this.sessionId) {
+                const sessionUrl = `http://${this.serverHost}:${this.inputPort}/api/session`;
+                const sessionRes = await fetch(sessionUrl, { method: 'POST' });
+                if (!sessionRes.ok) throw new Error('Failed to create session');
+                const sessionData = await sessionRes.json();
+                this.sessionId = sessionData.session_id;
+                
+                if (this.sessionIdDisplay) {
+                    this.sessionIdDisplay.textContent = this.sessionId;
+                }
+            }
+
             this.updateConnectionStatus('connected');
             this.startOutputPolling();
 
@@ -185,7 +215,7 @@ class ChatClient {
             this.eventSource.close();
         }
 
-        const url = `http://${this.serverHost}:${this.outputPort}/api/subscribe`;
+        const url = `http://${this.serverHost}:${this.outputPort}/api/subscribe?session_id=${this.sessionId}`;
         this.eventSource = new EventSource(url);
 
         this.eventSource.onopen = () => {
@@ -196,7 +226,7 @@ class ChatClient {
         this.eventSource.onmessage = (event) => {
             try {
                 const message = JSON.parse(event.data);
-                this.displayBotMessage(message);
+                this.handleIncomingMessage(message);
             } catch (error) {
                 console.error('Failed to parse message:', error);
             }
@@ -218,6 +248,36 @@ class ChatClient {
         };
     }
 
+    handleIncomingMessage(message) {
+        // Filter if not broadcast mode
+        // If message has no session_id (global broadcast?), show it.
+        // If message has session_id different from ours, check broadcast mode.
+        if (message.session_id && message.session_id !== this.sessionId && !this.isBroadcastMode) {
+            return;
+        }
+
+        const isMine = message.session_id === this.sessionId;
+        const isUserSource = message.source === 'user';
+        
+        if (isUserSource) {
+            // It's a user message (echo)
+            // Extract content: it comes as { type: 'user_message', content: '...', timestamp: ... }
+            let content = message.content;
+            if (typeof content === 'object' && content.content) {
+                content = content.content;
+            }
+
+            if (isMine) {
+                this.displayUserMessage(content);
+            } else {
+                this.displayOtherUserMessage(content);
+            }
+        } else {
+            // System/Bot message
+            this.displayBotMessage(message);
+        }
+    }
+
     async sendMessage() {
         const content = this.messageInput.value.trim();
         if (!content || !this.isConnected) return;
@@ -225,11 +285,12 @@ class ChatClient {
         this.setInputEnabled(false);
 
         try {
-            this.displayUserMessage(content);
+            // Optimistic display removed - relying on echo for consistency
+            // But we clear the input
             this.messageInput.value = '';
             this.messageInput.style.height = 'auto'; // Reset height
 
-            const url = `http://${this.serverHost}:${this.inputPort}/api/send`;
+            const url = `http://${this.serverHost}:${this.inputPort}/api/send/${this.sessionId}`;
             const response = await fetch(url, {
                 method: 'POST',
                 headers: {
@@ -237,7 +298,8 @@ class ChatClient {
                 },
                 body: JSON.stringify({
                     content: content,
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    session_id: this.sessionId
                 })
             });
 
@@ -245,11 +307,11 @@ class ChatClient {
                 throw new Error('Failed to send message');
             }
             
-            // We don't display result here, we wait for SSE
-
         } catch (error) {
             console.error('Send message failed:', error);
             this.displaySystemMessage(`Send failed: ${error.message}`);
+            // Restore input if failed? 
+            // Maybe not, just let user retype.
         } finally {
             this.setInputEnabled(true);
             this.messageInput.focus();
@@ -274,6 +336,9 @@ class ChatClient {
             if (data.message) return this.extractTextFromContent(data.message);
             const parts = [];
             for (const k of Object.keys(data)) {
+                // Skip internal metadata fields if needed, but for now just extract everything that looks like text
+                if (k === 'type' && data[k] === 'user_message') continue;
+                if (k === 'timestamp') continue;
                 const t = this.extractTextFromContent(data[k]);
                 if (t && t.trim() !== '') parts.push(t);
             }
@@ -282,9 +347,13 @@ class ChatClient {
         return '';
     }
 
-    createMessageElement(content, isUser) {
+    createMessageElement(content, isUser, isOtherUser = false) {
         const messageDiv = document.createElement('div');
-        messageDiv.className = `message ${isUser ? 'user-message' : 'bot-message'}`;
+        let className = 'message';
+        if (isUser) className += ' user-message';
+        else if (isOtherUser) className += ' other-user-message';
+        else className += ' bot-message';
+        messageDiv.className = className;
 
         const innerDiv = document.createElement('div');
         innerDiv.className = 'message-inner';
@@ -292,22 +361,22 @@ class ChatClient {
         // Avatar
         const avatarDiv = document.createElement('div');
         avatarDiv.className = 'message-avatar';
-        if (isUser) {
+        if (isUser || isOtherUser) {
              // User Icon
              avatarDiv.innerHTML = `<svg stroke="currentColor" fill="none" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" height="1.5em" width="1.5em" xmlns="http://www.w3.org/2000/svg"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`;
         } else {
              // Bot Icon (Green)
-             avatarDiv.innerHTML = `<svg stroke="currentColor" fill="none" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" height="1.5em" width="1.5em" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>`; // Simple placeholder for now, maybe the robot icon
+             avatarDiv.innerHTML = `<svg stroke="currentColor" fill="none" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" height="1.5em" width="1.5em" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>`; 
         }
 
         // Content
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
         
-        if (!isUser && typeof content !== 'string') {
+        if (!isUser && !isOtherUser && typeof content !== 'string') {
              contentDiv.innerHTML = `<pre><code>${JSON.stringify(content, null, 2)}</code></pre>`;
         } else {
-             if (!isUser && typeof content === 'string' && window.marked && window.DOMPurify) {
+             if (typeof content === 'string' && window.marked && window.DOMPurify) {
                  const html = window.marked.parse(content || '');
                  contentDiv.innerHTML = window.DOMPurify.sanitize(html);
              } else {
@@ -324,6 +393,12 @@ class ChatClient {
 
     displayUserMessage(content) {
         const msgEl = this.createMessageElement(content, true);
+        this.chatMessages.appendChild(msgEl);
+        this.scrollToBottom();
+    }
+    
+    displayOtherUserMessage(content) {
+        const msgEl = this.createMessageElement(content, false, true);
         this.chatMessages.appendChild(msgEl);
         this.scrollToBottom();
     }
@@ -347,7 +422,6 @@ class ChatClient {
 
     scrollToBottom() {
         this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
-        // Also scroll main content if needed, though chat-messages has overflow-y: auto
     }
     
     clearChat() {

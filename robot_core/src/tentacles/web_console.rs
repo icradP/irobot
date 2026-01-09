@@ -6,7 +6,7 @@ use crate::utils::{InputEvent, OutputEvent};
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::{
-    extract::{State, Query},
+    extract::{State, Query, Path},
     http::StatusCode,
     response::{Json, Sse},
     routing::{get, post},
@@ -39,6 +39,11 @@ pub struct WebMessage {
     pub timestamp: u64,
     #[serde(default)]
     pub session_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateSessionResponse {
+    pub session_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,7 +85,8 @@ impl WebInput {
         let input_state = WebInputState { input_sender };
 
         let app = Router::new()
-            .route("/api/send", post(send_message))
+            .route("/api/send/{session_id}", post(send_message))
+            .route("/api/session", post(create_session))
             .route("/health", get(health_check))
             .layer(
                 CorsLayer::new()
@@ -156,8 +162,9 @@ impl WebOutput {
         });
 
         let app = Router::new()
-            .route("/api/messages", get(get_messages))
-            .route("/api/subscribe", get(subscribe_to_messages))
+            .route("/api/messages/", get(get_messages)) // 获取所有消息
+            .route("/api/messages/{session_id}", get(get_messages_by_session)) // 获取指定会话的消息 
+            .route("/api/subscribe", get(subscribe_to_messages)) //获取主动通知消息
             .route("/health", get(health_check))
             .layer(
                 CorsLayer::new()
@@ -203,7 +210,7 @@ impl OutputHandler for WebOutput {
         {
             let mut subscribers = self.state.subscribers.lock().await;
             
-            // Iterate over all session buckets
+            // Iterate over all sessizon buckets
             for map in subscribers.values_mut() {
                 let mut to_remove = Vec::new();
                 for (id, sender) in map.iter() {
@@ -281,6 +288,18 @@ async fn get_messages(State(state): State<Arc<WebOutputState>>) -> Json<Vec<Outp
     Json(messages.clone())
 }
 
+async fn get_messages_by_session(
+    State(state): State<Arc<WebOutputState>>,
+    Path(session_id): Path<String>,
+) -> Json<Vec<OutputEvent>> {
+    let messages = state.messages.lock().await;
+    let filtered: Vec<OutputEvent> = messages.iter()
+        .filter(|msg| msg.session_id.as_deref() == Some(&session_id))
+        .cloned()
+        .collect();
+    Json(filtered)
+}
+
 #[derive(Deserialize)]
 struct SubscribeQuery {
     session_id: Option<String>,
@@ -315,5 +334,11 @@ async fn health_check() -> Json<WebResponse> {
         success: true,
         message: "Service is healthy".to_string(),
         data: None,
+    })
+}
+
+async fn create_session() -> Json<CreateSessionResponse> {
+    Json(CreateSessionResponse {
+        session_id: Uuid::new_v4().to_string(),
     })
 }
