@@ -1,13 +1,13 @@
+use crate::tools::ToolEntry;
 use crate::tools::to_object;
 use rmcp::{
+    ErrorData,
     model::*,
     service::{RequestContext, RoleServer},
-    ErrorData,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::tools::ToolEntry;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[schemars(description = "Sum of two numbers")]
@@ -17,6 +17,8 @@ pub struct SumRequest {
     #[schemars(description = "Second number")]
     pub b: i32,
 }
+
+impl rmcp::service::ElicitationSafe for SumRequest {}
 
 pub fn tool() -> ToolEntry {
     let schema = schemars::schema_for!(SumRequest);

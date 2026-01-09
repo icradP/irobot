@@ -3,28 +3,32 @@ pub mod input_handler;
 pub mod output_handler;
 pub mod persona;
 pub mod router;
-pub mod workflow_engine;
 pub mod session;
 pub mod sessions;
+pub mod workflow_engine;
 
 use crate::core::decision_engine::DecisionEngine;
 use crate::core::input_handler::InputHandler;
 use crate::core::output_handler::OutputHandler;
 use crate::core::persona::Persona;
 use crate::core::router::{EventRouter, HandlerId};
-use crate::core::workflow_engine::WorkflowEngine;
 use crate::core::session::SessionManager;
+use crate::core::workflow_engine::WorkflowEngine;
 use crate::mcp::client::MCPClient;
 use crate::utils::InputEvent;
+use futures::future::{BoxFuture, join_all};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::info;
-use futures::future::{join_all, BoxFuture};
 
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
-pub type McpClientFactory = Box<dyn Fn(String) -> BoxFuture<'static, anyhow::Result<Arc<dyn MCPClient + Send + Sync>>> + Send + Sync>;
+pub type McpClientFactory = Box<
+    dyn Fn(String) -> BoxFuture<'static, anyhow::Result<Arc<dyn MCPClient + Send + Sync>>>
+        + Send
+        + Sync,
+>;
 
 pub struct RobotCore {
     pub persona: Arc<Persona>,
@@ -47,8 +51,9 @@ impl RobotCore {
         mcp_client_factory: McpClientFactory,
     ) -> Self {
         let (input_sender, input_receiver) = mpsc::unbounded_channel();
-        let output_handlers: Arc<RwLock<HashMap<HandlerId, Box<dyn OutputHandler + Send + Sync>>>> = Arc::new(RwLock::new(HashMap::new()));
-        
+        let output_handlers: Arc<RwLock<HashMap<HandlerId, Box<dyn OutputHandler + Send + Sync>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
         let persona_arc = Arc::new(persona);
         let decision_engine_arc = Arc::new(decision_engine);
         let workflow_engine_arc = Arc::new(workflow_engine);
@@ -71,12 +76,13 @@ impl RobotCore {
             while let Ok(event) = output_bus_receiver.recv().await {
                 info!("Broadcasting system output from {}", event.source);
                 let handlers_guard = handlers_clone.read().await;
-                
+
                 // Collect futures to await them
-                let futures = handlers_guard.values()
+                let futures = handlers_guard
+                    .values()
                     .map(|handler| handler.emit(event.clone()))
                     .collect::<Vec<_>>();
-                
+
                 let results = join_all(futures).await;
                 for res in results {
                     if let Err(e) = res {

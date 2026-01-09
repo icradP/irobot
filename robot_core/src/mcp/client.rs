@@ -1,6 +1,6 @@
+use crate::mcp::registry::ToolMeta;
 use async_trait::async_trait;
 use serde_json::Value;
-use crate::mcp::registry::ToolMeta;
 
 #[async_trait]
 pub trait MCPClient: Send + Sync {

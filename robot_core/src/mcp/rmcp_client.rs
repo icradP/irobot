@@ -1,21 +1,26 @@
+use crate::core::persona::OutputStyle;
+use crate::llm::adapter::{ChatMessage, ChatRequest, LLMClient};
 use crate::mcp::client::MCPClient;
 use crate::mcp::registry::ToolMeta;
-use crate::llm::adapter::{ChatMessage, ChatRequest, LLMClient};
 use crate::utils::{OutputEvent, output_bus};
-use crate::core::persona::OutputStyle;
 use async_trait::async_trait;
-    use rmcp::{
-        model::{
-            CallToolRequestParam, ClientCapabilities, ClientInfo, CreateElicitationRequestParam,
-            CreateElicitationResult, ElicitationAction, Implementation,
-        },
-        service::{RequestContext, RoleClient, RunningService},
-        ServiceExt,
-    };
-    use std::sync::{Arc, Mutex};
+use futures::future::BoxFuture;
+use rmcp::{
+    ServiceExt,
+    model::{
+        CallToolRequestParam, ClientCapabilities, ClientInfo, CreateElicitationRequestParam,
+        CreateElicitationResult, ElicitationAction, Implementation, ListRootsResult, Root,
+    },
+    service::{RequestContext, RoleClient, RunningService},
+};
+use std::sync::{Arc, Mutex};
 
 pub struct RmcpStdIoClient {
-    service: RunningService<RoleClient, RobotClientHandler>,
+    server_addr: String,
+    llm: Arc<dyn LLMClient + Send + Sync>,
+    model: String,
+    session_id: String,
+    service: tokio::sync::Mutex<Option<RunningService<RoleClient, RobotClientHandler>>>,
     shared: Arc<Mutex<SharedCtx>>,
 }
 
@@ -48,7 +53,8 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
     ) -> impl std::future::Future<Output = Result<CreateElicitationResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            let schema_str = serde_json::to_string_pretty(&request.requested_schema).unwrap_or_default();
+            let schema_str =
+                serde_json::to_string_pretty(&request.requested_schema).unwrap_or_default();
             eprintln!("Message: {}", request.message);
             eprintln!("Schema: {}", schema_str);
             eprintln!("Please provide input (Natural language or JSON): ");
@@ -63,7 +69,6 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                 );
             }
 
-            
             // Use the session_id bound to this client
             let sid = self.session_id.clone();
 
@@ -78,7 +83,7 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                 }),
                 style: OutputStyle::Neutral,
             };
-            
+
             if let Err(e) = output_bus().send(output_event) {
                 eprintln!("[elicit] Failed to send output event: {}", e);
             }
@@ -97,10 +102,7 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                     }
                 }
             };
-            let input = if let Some(s) = input_event
-                .payload
-                .get("content")
-                .and_then(|v| v.as_str())
+            let input = if let Some(s) = input_event.payload.get("content").and_then(|v| v.as_str())
             {
                 s.to_string()
             } else {
@@ -116,8 +118,10 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                     v
                 }
                 Err(_) => {
-                    eprintln!("[elicit] Input is not valid JSON, attempting to use LLM to transform...");
-                    
+                    eprintln!(
+                        "[elicit] Input is not valid JSON, attempting to use LLM to transform..."
+                    );
+
                     let system_prompt = format!(
                         "You are a helpful assistant that converts natural language input into a JSON object based on a provided schema.\n\
                         Schema:\n{}\n\
@@ -150,7 +154,7 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                         Ok(response) => {
                             let text = response.text.trim();
                             eprintln!("[elicit] LLM response: {}", text);
-                            
+
                             // Clean up potential markdown code blocks
                             let json_str = if let Some(start) = text.find('{') {
                                 if let Some(end) = text.rfind('}') {
@@ -171,7 +175,7 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                                     // Mark event as consumed so core doesn't process it again
                                     crate::utils::mark_event_consumed(input_event.id);
                                     v
-                                },
+                                }
                                 Err(e) => {
                                     eprintln!("[elicit] ERROR: LLM produced invalid JSON: {}", e);
                                     return Err(rmcp::ErrorData::invalid_params(
@@ -199,6 +203,25 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
             })
         }
     }
+
+    fn list_roots(
+        &self,
+        _context: RequestContext<RoleClient>,
+    ) -> impl std::future::Future<Output = Result<ListRootsResult, rmcp::ErrorData>> + Send + '_
+    {
+        async move {
+            let current_dir = std::env::current_dir().map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("Failed to get current dir: {}", e), None)
+            })?;
+
+            Ok(ListRootsResult {
+                roots: vec![Root {
+                    uri: format!("file://{}", current_dir.display()).into(),
+                    name: Some("Current Working Directory".into()),
+                }],
+            })
+        }
+    }
 }
 
 impl RmcpStdIoClient {
@@ -207,20 +230,36 @@ impl RmcpStdIoClient {
         model: String,
         session_id: String,
     ) -> anyhow::Result<Self> {
-        // TCP connection to MCP server
         let server_addr =
             std::env::var("ROBOT_MCP_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:9001".to_string());
-
-        tracing::info!("Connecting to MCP server at: {} for session {}", server_addr, session_id);
-        let stream = tokio::net::TcpStream::connect(&server_addr).await?;
-        tracing::info!("Connected to MCP server for session {}", session_id);
-
         let shared = Arc::new(Mutex::new(SharedCtx::default()));
+        Ok(Self {
+            server_addr,
+            llm,
+            model,
+            session_id,
+            service: tokio::sync::Mutex::new(None),
+            shared,
+        })
+    }
+
+    async fn connect(&self) -> anyhow::Result<RunningService<RoleClient, RobotClientHandler>> {
+        tracing::info!(
+            "Connecting to MCP server at: {} for session {}",
+            self.server_addr,
+            self.session_id
+        );
+        let stream = tokio::net::TcpStream::connect(&self.server_addr).await?;
+        tracing::info!("Connected to MCP server for session {}", self.session_id);
+
         let client_info = ClientInfo {
             protocol_version: Default::default(),
-            capabilities: ClientCapabilities::builder().enable_elicitation().build(),
+            capabilities: ClientCapabilities::builder()
+                .enable_elicitation()
+                .enable_roots()
+                .build(),
             client_info: Implementation {
-                name: format!("robot-core-client-{}", session_id),
+                name: format!("robot-core-client-{}", self.session_id),
                 title: None,
                 version: "0.1.0".to_string(),
                 website_url: None,
@@ -229,14 +268,87 @@ impl RmcpStdIoClient {
         };
         let handler = RobotClientHandler {
             info: client_info,
-            shared: shared.clone(),
-
-            llm,
-            model,
-            session_id,
+            shared: self.shared.clone(),
+            llm: self.llm.clone(),
+            model: self.model.clone(),
+            session_id: self.session_id.clone(),
         };
-        let service = handler.serve(stream).await?;
-        Ok(Self { service, shared })
+        Ok(handler.serve(stream).await?)
+    }
+
+    async fn ensure_connected(&self) -> anyhow::Result<()> {
+        {
+            let guard = self.service.lock().await;
+            if guard.is_some() {
+                return Ok(());
+            }
+        }
+
+        let service = self.connect().await?;
+        let mut guard = self.service.lock().await;
+        if guard.is_none() {
+            *guard = Some(service);
+        }
+        Ok(())
+    }
+
+    fn should_reconnect(error_text: &str) -> bool {
+        let s = error_text.to_ascii_lowercase();
+        s.contains("broken pipe")
+            || s.contains("connection")
+            || s.contains("transport")
+            || s.contains("closed")
+            || s.contains("eof")
+            || s.contains("reset by peer")
+            || s.contains("os error")
+    }
+
+    async fn with_service_retry<T, E, F>(&self, op_name: &'static str, f: F) -> anyhow::Result<T>
+    where
+        F: for<'a> Fn(
+                &'a RunningService<RoleClient, RobotClientHandler>,
+            ) -> BoxFuture<'a, Result<T, E>>
+            + Clone
+            + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        T: Send,
+    {
+        self.ensure_connected().await?;
+
+        let f1 = f.clone();
+        let res = {
+            let guard = self.service.lock().await;
+            let service = guard
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("MCP 未连接"))?;
+            f1(service).await
+        };
+
+        match res {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let text = e.to_string();
+                if Self::should_reconnect(&text) {
+                    tracing::warn!("MCP {} 失败，尝试重连: {}", op_name, text);
+                    {
+                        let mut guard = self.service.lock().await;
+                        *guard = None;
+                    }
+                    self.ensure_connected().await?;
+                    let f2 = f.clone();
+                    let res2 = {
+                        let guard = self.service.lock().await;
+                        let service = guard
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("MCP 未连接"))?;
+                        f2(service).await
+                    };
+                    Ok(res2?)
+                } else {
+                    Err(anyhow::anyhow!(e))
+                }
+            }
+        }
     }
 }
 
@@ -256,7 +368,7 @@ impl MCPClient for RmcpStdIoClient {
             false
         };
 
-        // Note: We no longer need to capture session_id from args because this client 
+        // Note: We no longer need to capture session_id from args because this client
         // is already dedicated to a specific session_id.
 
         let arguments = if should_elicit {
@@ -276,11 +388,15 @@ impl MCPClient for RmcpStdIoClient {
             None
         };
 
+        let tool_name = tool.to_string();
         let result = self
-            .service
-            .call_tool(CallToolRequestParam {
-                name: tool.to_string().into(),
-                arguments,
+            .with_service_retry("call_tool", move |svc| {
+                let arguments = arguments.clone();
+                let tool_name = tool_name.clone();
+                Box::pin(svc.call_tool(CallToolRequestParam {
+                    name: tool_name.into(),
+                    arguments,
+                }))
             })
             .await?;
         let val = serde_json::to_value(&result)?;
@@ -292,7 +408,9 @@ impl MCPClient for RmcpStdIoClient {
     }
 
     async fn list_tools(&self) -> anyhow::Result<Vec<ToolMeta>> {
-        let tools = self.service.list_all_tools().await?;
+        let tools = self
+            .with_service_retry("list_tools", |svc| Box::pin(svc.list_all_tools()))
+            .await?;
         let metas = tools
             .into_iter()
             .map(|t| ToolMeta {
@@ -304,7 +422,11 @@ impl MCPClient for RmcpStdIoClient {
     }
 
     async fn required_fields(&self, tool: &str) -> anyhow::Result<Vec<String>> {
-        let tools = self.service.list_all_tools().await?;
+        let tools = self
+            .with_service_retry("required_fields(list_tools)", |svc| {
+                Box::pin(svc.list_all_tools())
+            })
+            .await?;
         for t in tools {
             if t.name.as_ref() == tool {
                 let schema = &*t.input_schema;
@@ -321,7 +443,11 @@ impl MCPClient for RmcpStdIoClient {
     }
 
     async fn tool_schema(&self, tool: &str) -> anyhow::Result<Option<serde_json::Value>> {
-        let tools = self.service.list_all_tools().await?;
+        let tools = self
+            .with_service_retry("tool_schema(list_tools)", |svc| {
+                Box::pin(svc.list_all_tools())
+            })
+            .await?;
         for t in tools {
             if t.name.as_ref() == tool {
                 return Ok(Some(serde_json::Value::Object((*t.input_schema).clone())));
@@ -331,15 +457,17 @@ impl MCPClient for RmcpStdIoClient {
     }
 
     async fn elicit_preview(&self, tool: &str) -> anyhow::Result<Option<serde_json::Value>> {
-        // Build preview based on tool schema without triggering a server call
-        let tools = self.service.list_all_tools().await?;
+        let tools = self
+            .with_service_retry("elicit_preview(list_tools)", |svc| {
+                Box::pin(svc.list_all_tools())
+            })
+            .await?;
         for t in tools {
             if t.name.as_ref() == tool {
                 let schema = serde_json::Value::Object((*t.input_schema).clone());
-                let msg: std::borrow::Cow<'_, str> = t
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| std::borrow::Cow::Owned("请根据如下 schema 提供参数".to_string()));
+                let msg: std::borrow::Cow<'_, str> = t.description.clone().unwrap_or_else(|| {
+                    std::borrow::Cow::Owned("请根据如下 schema 提供参数".to_string())
+                });
                 let payload = serde_json::json!({
                     "type": "elicitation",
                     "message": msg,
@@ -356,33 +484,34 @@ impl MCPClient for RmcpStdIoClient {
 mod tests {
     use super::RmcpStdIoClient;
 
+    use crate::llm::adapter::{ChatOutput, ChatRequest, LLMClient};
     use crate::mcp::client::MCPClient;
     use crate::mcp::registry::ToolMeta;
-    use crate::llm::adapter::{LLMClient, ChatRequest, ChatResponse};
     use async_trait::async_trait;
     use std::sync::Arc;
 
     struct MockLLM;
     #[async_trait]
     impl LLMClient for MockLLM {
-        async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
-            Ok(ChatResponse {
+        async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatOutput> {
+            Ok(ChatOutput {
                 text: "{}".to_string(),
-                usage: None,
-            })
-        }
-        async fn embedding(&self, _request: crate::llm::adapter::EmbeddingRequest) -> anyhow::Result<crate::llm::adapter::EmbeddingResponse> {
-            Ok(crate::llm::adapter::EmbeddingResponse {
-                data: vec![],
-                usage: None,
+                raw: serde_json::Value::Object(serde_json::Map::new()),
             })
         }
     }
 
     #[tokio::test]
+    #[ignore]
     async fn list_and_call_echo() {
         let mock_llm = Arc::new(MockLLM);
-        let client = RmcpStdIoClient::new(mock_llm, "test-model".to_string()).await.unwrap();
+        let client = RmcpStdIoClient::new(
+            mock_llm,
+            "test-model".to_string(),
+            "test-session".to_string(),
+        )
+        .await
+        .unwrap();
         let tools: Vec<ToolMeta> = client.list_tools().await.unwrap();
         assert!(tools.iter().any(|t| t.name == "echo"));
         let args = serde_json::json!({"message": "hello"});

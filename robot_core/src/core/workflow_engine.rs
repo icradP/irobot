@@ -2,9 +2,9 @@ use crate::core::output_handler::OutputHandler;
 use crate::core::persona::Persona;
 use crate::mcp::client::MCPClient;
 use crate::utils::WorkflowPlan;
-use crate::workflow_steps::{build_step, StepResult, ParameterResolver, NoopResolver};
-use tracing::info;
+use crate::workflow_steps::{NoopResolver, ParameterResolver, StepResult, build_step};
 use std::sync::Arc;
+use tracing::info;
 
 pub struct WorkflowEngine {
     pub resolver: Arc<dyn ParameterResolver + Send + Sync>,
@@ -12,7 +12,9 @@ pub struct WorkflowEngine {
 
 impl WorkflowEngine {
     pub fn new() -> Self {
-        Self { resolver: Arc::new(NoopResolver) }
+        Self {
+            resolver: Arc::new(NoopResolver),
+        }
     }
     pub fn new_with_resolver(resolver: Arc<dyn ParameterResolver + Send + Sync>) -> Self {
         Self { resolver }
@@ -34,8 +36,11 @@ impl WorkflowEngine {
             let res: StepResult = step.run(&mut ctx, mcp).await?;
             if let Some(mut o) = res.output {
                 o.source = input_source.clone();
-                
-                info!("workflow step produced output, dispatching to {} handlers", outputs.len());
+
+                info!(
+                    "workflow step produced output, dispatching to {} handlers",
+                    outputs.len()
+                );
                 for h in outputs {
                     h.emit(o.clone()).await?;
                 }

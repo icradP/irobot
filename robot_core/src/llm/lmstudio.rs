@@ -1,12 +1,12 @@
 use crate::llm::adapter::{ChatOutput, ChatRequest, LLMClient};
 use async_trait::async_trait;
 use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::{Method, Request};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use http_body_util::{BodyExt, Full};
 use serde_json::json;
 use tracing::info;
 use url::Url;

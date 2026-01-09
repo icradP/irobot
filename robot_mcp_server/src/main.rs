@@ -1,26 +1,16 @@
 use anyhow::Result;
 use rmcp::{
-    elicit_safe,
+    ErrorData, ServerHandler, ServiceExt, elicit_safe,
     model::*,
     service::{RequestContext, RoleServer},
-    ErrorData, ServerHandler, ServiceExt,
 };
 use std::sync::{Arc, Mutex};
-use tracing_subscriber::{self, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{self, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 mod tools;
 use crate::tools::AppState;
 mod external;
 
-elicit_safe!(
-    tools::EchoRequest,
-    tools::SumRequest,
-    tools::ProfileUpdateRequest,
-    tools::ProfileGetRequest,
-    tools::ChatRequest,
-    tools::GetWeatherRequest,
-    tools::GetCurrentDatetimeRequest,
-    external::BridgeRaw,
-);
+elicit_safe!();
 
 #[derive(Clone)]
 pub struct RobotService {
@@ -61,7 +51,11 @@ impl ServerHandler for RobotService {
                 tracing::warn!("List external tools failed: {}", e);
             }
         }
-        Ok(ListToolsResult { tools: list, meta: None, next_cursor: None })
+        Ok(ListToolsResult {
+            tools: list,
+            meta: None,
+            next_cursor: None,
+        })
     }
 
     async fn call_tool(
@@ -72,11 +66,18 @@ impl ServerHandler for RobotService {
         if external::parse_external_name(&request.name).is_some() {
             match self
                 .externals
-                .call_external(&request.name, request.arguments.map(|v| v.into()), context.clone())
+                .call_external(
+                    &request.name,
+                    request.arguments.map(|v| v.into()),
+                    context.clone(),
+                )
                 .await
             {
                 Ok(res) => Ok(res),
-                Err(e) => Err(ErrorData::internal_error(format!("外部调用失败: {}", e), None)),
+                Err(e) => Err(ErrorData::internal_error(
+                    format!("外部调用失败: {}", e),
+                    None,
+                )),
             }
         } else {
             tools::dispatch(

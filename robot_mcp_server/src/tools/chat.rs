@@ -1,22 +1,34 @@
-use schemars::JsonSchema;
-use serde::{Serialize, Deserialize};
-use rmcp::{ErrorData, model::*, service::{RoleServer, RequestContext}};
-use std::sync::Arc;
-use crate::tools::{to_object, ToolEntry};
-use url::Url;
+use crate::tools::{ToolEntry, to_object};
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::{Method, Request};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use http_body_util::{BodyExt, Full};
-use bytes::Bytes;
+use rmcp::{
+    ErrorData,
+    model::*,
+    service::{RequestContext, RoleServer},
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use url::Url;
 // remove unused duplicated imports
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ChatMessage { pub role: String, pub content: String }
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ChatRequest { pub model: Option<String>, pub messages: Vec<ChatMessage>, pub temperature: Option<f32> }
+pub struct ChatRequest {
+    pub model: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub temperature: Option<f32>,
+}
+impl rmcp::service::ElicitationSafe for ChatRequest {}
 
 pub fn tool() -> ToolEntry {
     let schema = schemars::schema_for!(ChatRequest);
@@ -41,16 +53,29 @@ pub async fn handle(
     let args: ChatRequest = if let Some(args) = request {
         serde_json::from_value(args).map_err(|e| ErrorData::invalid_params(e.to_string(), None))?
     } else {
-        match context.peer.elicit::<ChatRequest>("请输入聊天的参数".to_string()).await {
+        match context
+            .peer
+            .elicit::<ChatRequest>("请输入聊天的参数".to_string())
+            .await
+        {
             Ok(Some(params)) => params,
             Ok(None) => return Err(ErrorData::invalid_params("未提供参数", None)),
-            Err(e) => return Err(ErrorData::internal_error(format!("elicitation 错误: {}", e), None)),
+            Err(e) => {
+                return Err(ErrorData::internal_error(
+                    format!("elicitation 错误: {}", e),
+                    None,
+                ));
+            }
         }
     };
-    let base = std::env::var("LMSTUDIO_URL").unwrap_or_else(|_| "http://localhost:1234".to_string());
+    let base =
+        std::env::var("LMSTUDIO_URL").unwrap_or_else(|_| "http://localhost:1234".to_string());
     let api_key = std::env::var("LMSTUDIO_API_KEY").ok();
-    let model = args.model.unwrap_or_else(|| std::env::var("LMSTUDIO_MODEL").unwrap_or_else(|_| "default".to_string()));
-    let mut endpoint = Url::parse(&base).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    let model = args.model.unwrap_or_else(|| {
+        std::env::var("LMSTUDIO_MODEL").unwrap_or_else(|_| "default".to_string())
+    });
+    let mut endpoint =
+        Url::parse(&base).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
     endpoint.set_path("/v1/chat/completions");
     let payload = serde_json::json!({
         "model": model,
@@ -66,15 +91,32 @@ pub async fn handle(
     if let Some(key) = api_key {
         builder = builder.header("authorization", format!("Bearer {}", key));
     }
-    let req = builder.body(Full::new(Bytes::from(payload.to_string()))).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-    let res: hyper::Response<Incoming> = client.request(req).await.map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    let req = builder
+        .body(Full::new(Bytes::from(payload.to_string())))
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    let res: hyper::Response<Incoming> = client
+        .request(req)
+        .await
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
     let status = res.status();
-    let body_bytes = res.into_body().collect().await.map_err(|e| ErrorData::internal_error(e.to_string(), None))?.to_bytes();
-    let raw: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    let body_bytes = res
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+        .to_bytes();
+    let raw: serde_json::Value = serde_json::from_slice(&body_bytes)
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
     if !status.is_success() {
-        return Err(ErrorData::internal_error(format!("status {} error: {}", status, raw), None));
+        return Err(ErrorData::internal_error(
+            format!("status {} error: {}", status, raw),
+            None,
+        ));
     }
-    let text = raw["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string();
+    let text = raw["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 

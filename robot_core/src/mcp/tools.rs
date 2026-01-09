@@ -6,4 +6,3 @@ pub struct ToolCall {
     pub name: String,
     pub args: Value,
 }
-

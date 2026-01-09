@@ -152,11 +152,7 @@ impl ParameterResolver for LlmParameterResolver {
 
         let json_slice = if let Some(start) = s.find('{') {
             if let Some(end) = s.rfind('}') {
-                if end >= start {
-                    &s[start..=end]
-                } else {
-                    s
-                }
+                if end >= start { &s[start..=end] } else { s }
             } else {
                 s
             }
@@ -248,13 +244,16 @@ impl WorkflowStep for McpToolStep {
         if let Some(session_id) = ctx.session_id.clone() {
             if let Some(obj) = resolved_args.as_object_mut() {
                 if !obj.contains_key("session_id") {
-                    obj.insert("session_id".to_string(), serde_json::Value::String(session_id));
+                    obj.insert(
+                        "session_id".to_string(),
+                        serde_json::Value::String(session_id),
+                    );
                 }
             }
         }
-        
+
         // Removed client-side validation to allow MCP server to handle elicitation
-        
+
         let val = mcp.call(&self.name, resolved_args).await?;
         ctx.memory = serde_json::json!({"last_tool_result": val.clone()});
         let o = OutputEvent {

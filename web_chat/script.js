@@ -9,10 +9,13 @@ class ChatClient {
 
         this.sessionId = null;
         this.isBroadcastMode = false;
+        this.sessions = [];
+        this.sessionMessages = {};
 
         this.initializeElements();
         this.bindEvents();
         this.loadSettings();
+        this.loadState();
         this.connect();
     }
 
@@ -22,6 +25,12 @@ class ChatClient {
         this.messageInput = document.getElementById('messageInput');
         this.sendButton = document.getElementById('sendButton');
         this.connectionDot = document.getElementById('connectionDot');
+        
+        // File upload elements
+        this.fileInput = document.getElementById('fileInput');
+        this.attachBtn = document.getElementById('attachBtn');
+        this.filePreview = document.getElementById('filePreview');
+        this.selectedFiles = [];
 
         // Settings elements
         this.settingsModal = document.getElementById('settingsModal');
@@ -36,6 +45,7 @@ class ChatClient {
         
         // Sidebar elements
         this.newChatBtn = document.getElementById('newChatBtn');
+        this.historyList = document.getElementById('historyList');
     }
 
     bindEvents() {
@@ -56,6 +66,10 @@ class ChatClient {
                 this.messageInput.style.height = 'auto'; // Reset when empty
             }
         });
+        
+        // File attachment
+        this.attachBtn.addEventListener('click', () => this.fileInput.click());
+        this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
 
         // Settings modal
         this.settingsBtn.addEventListener('click', () => {
@@ -82,9 +96,263 @@ class ChatClient {
         
         // New Chat
         this.newChatBtn.addEventListener('click', () => {
-            this.clearChat();
-            // Optionally regenerate session ID for a truly new chat?
-            // For now, keep session ID stable to simulate a user session.
+            this.createNewChat();
+        });
+    }
+    
+    handleFileSelect(e) {
+        if (e.target.files && e.target.files.length > 0) {
+            const files = Array.from(e.target.files);
+            this.selectedFiles = [...this.selectedFiles, ...files];
+            this.renderFilePreview();
+            this.fileInput.value = '';
+        }
+    }
+
+    renderFilePreview() {
+        this.filePreview.innerHTML = '';
+        this.selectedFiles.forEach((file, index) => {
+            const chip = document.createElement('div');
+            chip.className = 'file-chip';
+            
+            let progressHtml = '';
+            if (file.uploadProgress !== undefined) {
+                progressHtml = `<span class="upload-progress" style="margin-left:5px; color:#10a37f; font-size:0.7em;">${file.uploadProgress}%</span>`;
+            }
+
+            chip.innerHTML = `
+                <span>${file.name}</span>
+                ${progressHtml}
+                <span class="remove-file" data-index="${index}">×</span>
+            `;
+            chip.querySelector('.remove-file').addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.selectedFiles.splice(index, 1);
+                this.renderFilePreview();
+            });
+            this.filePreview.appendChild(chip);
+        });
+    }
+
+    async calculateMD5(file) {
+        return new Promise((resolve, reject) => {
+            const blobSlice = File.prototype.slice || File.prototype.mozSlice || File.prototype.webkitSlice;
+            const chunkSize = 2097152; // 2MB
+            const chunks = Math.ceil(file.size / chunkSize);
+            let currentChunk = 0;
+            const spark = new SparkMD5.ArrayBuffer();
+            const fileReader = new FileReader();
+
+            fileReader.onload = function(e) {
+                spark.append(e.target.result);
+                currentChunk++;
+                if (currentChunk < chunks) {
+                    loadNext();
+                } else {
+                    resolve(spark.end());
+                }
+            };
+
+            fileReader.onerror = function() {
+                reject('MD5 calculation failed');
+            };
+
+            function loadNext() {
+                const start = currentChunk * chunkSize;
+                const end = ((start + chunkSize) >= file.size) ? file.size : start + chunkSize;
+                fileReader.readAsArrayBuffer(blobSlice.call(file, start, end));
+            }
+
+            loadNext();
+        });
+    }
+
+    async uploadFileWithProgress(file, onProgress) {
+        // 1. Calc MD5
+        onProgress(0); // Start
+        const md5 = await this.calculateMD5(file);
+        
+        // 2. Check Exists
+        const checkRes = await fetch(`http://${this.serverHost}:${this.inputPort}/api/check_file`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ md5, filename: file.name })
+        });
+        const checkData = await checkRes.json();
+        if (checkData.exists) {
+            onProgress(100);
+            return checkData.file.path;
+        }
+
+        // 3. Upload
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            const formData = new FormData();
+            formData.append('files', file);
+
+            xhr.upload.addEventListener('progress', (e) => {
+                if (e.lengthComputable) {
+                    const percent = Math.round((e.loaded / e.total) * 100);
+                    onProgress(percent);
+                }
+            });
+
+            xhr.addEventListener('load', () => {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    const resp = JSON.parse(xhr.responseText);
+                    resolve(resp.data.files[0]);
+                } else {
+                    reject(new Error('Upload failed'));
+                }
+            });
+
+            xhr.addEventListener('error', () => reject(new Error('Network error')));
+            
+            xhr.open('POST', `http://${this.serverHost}:${this.inputPort}/api/upload`);
+            xhr.send(formData);
+        });
+    }
+
+    async uploadFiles() {
+        if (this.selectedFiles.length === 0) return [];
+        
+        const uploadedPaths = [];
+        
+        for (let i = 0; i < this.selectedFiles.length; i++) {
+            const file = this.selectedFiles[i];
+            
+            const onProgress = (percent) => {
+                file.uploadProgress = percent;
+                this.renderFilePreview();
+            };
+
+            try {
+                const path = await this.uploadFileWithProgress(file, onProgress);
+                uploadedPaths.push(path);
+            } catch (e) {
+                console.error(`Upload failed for ${file.name}:`, e);
+                alert(`Upload failed for ${file.name}`);
+                throw e;
+            }
+        }
+        return uploadedPaths;
+    }
+
+    loadState() {
+         const state = localStorage.getItem('chatState');
+         if (state) {
+             const parsed = JSON.parse(state);
+             this.sessions = parsed.sessions || [];
+             this.sessionMessages = parsed.sessionMessages || {};
+             this.sessionId = parsed.currentSessionId;
+         }
+    }
+
+    saveState() {
+        const state = {
+            sessions: this.sessions,
+            sessionMessages: this.sessionMessages,
+            currentSessionId: this.sessionId
+        };
+        localStorage.setItem('chatState', JSON.stringify(state));
+    }
+
+    async createNewChat() {
+        try {
+            if (this.sessions.length >= 10) {
+                const removed = this.sessions.pop();
+                if (removed) delete this.sessionMessages[removed.id];
+            }
+
+            const sessionUrl = `http://${this.serverHost}:${this.inputPort}/api/session`;
+            const res = await fetch(sessionUrl, { method: 'POST' });
+            if (!res.ok) throw new Error('Failed to create session');
+            const data = await res.json();
+            const newId = data.session_id;
+
+            const newSession = {
+                id: newId,
+                title: `Chat ${new Date().toLocaleTimeString()}`, // Better naming
+                created_at: Date.now()
+            };
+            this.sessions.unshift(newSession);
+            this.sessionMessages[newId] = [];
+            
+            this.switchSession(newId);
+        } catch (e) {
+            console.error("Failed to create new chat:", e);
+        }
+    }
+
+    deleteSession(id, event) {
+        if (event) event.stopPropagation();
+        
+        const index = this.sessions.findIndex(s => s.id === id);
+        if (index === -1) return;
+
+        this.sessions.splice(index, 1);
+        delete this.sessionMessages[id];
+
+        if (this.sessionId === id) {
+            if (this.sessions.length > 0) {
+                this.switchSession(this.sessions[0].id);
+            } else {
+                this.createNewChat();
+            }
+        } else {
+            this.renderHistoryList();
+            this.saveState();
+        }
+    }
+
+    switchSession(id, force = false) {
+        if (!force && this.sessionId === id) return;
+
+        this.sessionId = id;
+        if (this.sessionIdDisplay) this.sessionIdDisplay.textContent = id;
+        
+        this.renderHistoryList();
+
+        // Clear and restore
+        this.chatMessages.innerHTML = '';
+        const messages = this.sessionMessages[id] || [];
+        messages.forEach(msg => {
+            if (msg.type === 'user') {
+                 if (msg.isOther) this.displayOtherUserMessage(msg.content, msg.files, false);
+                 else this.displayUserMessage(msg.content, msg.files, false);
+            } else {
+                 this.displayBotMessage(msg.content, false);
+            }
+        });
+
+        // Reconnect
+        this.startOutputPolling();
+        this.saveState();
+    }
+
+    renderHistoryList() {
+        this.historyList.innerHTML = '';
+        this.sessions.forEach(session => {
+            const btn = document.createElement('div');
+            btn.className = `nav-item ${session.id === this.sessionId ? 'active' : ''}`;
+            
+            const content = document.createElement('div');
+            content.className = 'nav-item-content';
+            content.innerHTML = `
+                <svg stroke="currentColor" fill="none" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" height="1em" width="1em" xmlns="http://www.w3.org/2000/svg"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+                <span class="text-truncate">${session.title}</span>
+            `;
+            content.addEventListener('click', () => this.switchSession(session.id));
+
+            const delBtn = document.createElement('button');
+            delBtn.className = 'delete-chat-btn';
+            delBtn.innerHTML = '<svg stroke="currentColor" fill="none" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" height="1em" width="1em" xmlns="http://www.w3.org/2000/svg"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+            delBtn.title = 'Delete chat';
+            delBtn.addEventListener('click', (e) => this.deleteSession(session.id, e));
+
+            btn.appendChild(content);
+            btn.appendChild(delBtn);
+            this.historyList.appendChild(btn);
         });
     }
 
@@ -106,7 +374,9 @@ class ChatClient {
         this.outputPortInput.value = this.outputPort;
         this.serverHostInput.value = this.serverHost;
         this.broadcastModeInput.checked = this.isBroadcastMode;
-        this.sessionIdDisplay.textContent = this.sessionId;
+        if (this.sessionId) {
+            this.sessionIdDisplay.textContent = this.sessionId;
+        }
     }
 
     saveSettings() {
@@ -151,7 +421,6 @@ class ChatClient {
         try {
             // Test input server connection
             const inputUrl = `http://${this.serverHost}:${this.inputPort}/health`;
-            // Note: We might want to use a short timeout for health check
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 2000);
             
@@ -179,16 +448,33 @@ class ChatClient {
             }
 
             // Create new session from backend
-            if (!this.sessionId) {
+            let needNewSession = !this.sessionId;
+            if (this.sessionId && !this.sessions.some(s => s.id === this.sessionId)) {
+                needNewSession = true;
+            }
+
+            if (needNewSession) {
                 const sessionUrl = `http://${this.serverHost}:${this.inputPort}/api/session`;
                 const sessionRes = await fetch(sessionUrl, { method: 'POST' });
                 if (!sessionRes.ok) throw new Error('Failed to create session');
                 const sessionData = await sessionRes.json();
-                this.sessionId = sessionData.session_id;
+                const newId = sessionData.session_id;
                 
-                if (this.sessionIdDisplay) {
-                    this.sessionIdDisplay.textContent = this.sessionId;
-                }
+                // Add initial session to list
+                const newSession = {
+                    id: newId,
+                    title: `Chat ${this.sessions.length + 1}`,
+                    created_at: Date.now()
+                };
+                this.sessions.unshift(newSession);
+                this.sessionMessages[newId] = [];
+                this.switchSession(newId, true);
+            } else {
+                this.switchSession(this.sessionId, true);
+            }
+
+            if (this.sessionIdDisplay) {
+                this.sessionIdDisplay.textContent = this.sessionId;
             }
 
             this.updateConnectionStatus('connected');
@@ -249,9 +535,6 @@ class ChatClient {
     }
 
     handleIncomingMessage(message) {
-        // Filter if not broadcast mode
-        // If message has no session_id (global broadcast?), show it.
-        // If message has session_id different from ours, check broadcast mode.
         if (message.session_id && message.session_id !== this.sessionId && !this.isBroadcastMode) {
             return;
         }
@@ -261,16 +544,18 @@ class ChatClient {
         
         if (isUserSource) {
             // It's a user message (echo)
-            // Extract content: it comes as { type: 'user_message', content: '...', timestamp: ... }
             let content = message.content;
-            if (typeof content === 'object' && content.content) {
-                content = content.content;
+            let files = [];
+            
+            if (typeof content === 'object') {
+                if (content.files) files = content.files;
+                if (content.content) content = content.content;
             }
 
             if (isMine) {
-                this.displayUserMessage(content);
+                this.displayUserMessage(content, files);
             } else {
-                this.displayOtherUserMessage(content);
+                this.displayOtherUserMessage(content, files);
             }
         } else {
             // System/Bot message
@@ -280,15 +565,23 @@ class ChatClient {
 
     async sendMessage() {
         const content = this.messageInput.value.trim();
-        if (!content || !this.isConnected) return;
+        const hasFiles = this.selectedFiles.length > 0;
+        
+        if ((!content && !hasFiles) || !this.isConnected) return;
 
         this.setInputEnabled(false);
 
         try {
-            // Optimistic display removed - relying on echo for consistency
-            // But we clear the input
+            let uploadedFiles = [];
+            if (hasFiles) {
+                uploadedFiles = await this.uploadFiles();
+            }
+
             this.messageInput.value = '';
-            this.messageInput.style.height = 'auto'; // Reset height
+            this.messageInput.style.height = 'auto';
+            
+            this.selectedFiles = [];
+            this.renderFilePreview();
 
             const url = `http://${this.serverHost}:${this.inputPort}/api/send/${this.sessionId}`;
             const response = await fetch(url, {
@@ -299,7 +592,8 @@ class ChatClient {
                 body: JSON.stringify({
                     content: content,
                     timestamp: Date.now(),
-                    session_id: this.sessionId
+                    session_id: this.sessionId,
+                    files: uploadedFiles.length > 0 ? uploadedFiles : undefined
                 })
             });
 
@@ -310,8 +604,6 @@ class ChatClient {
         } catch (error) {
             console.error('Send message failed:', error);
             this.displaySystemMessage(`Send failed: ${error.message}`);
-            // Restore input if failed? 
-            // Maybe not, just let user retype.
         } finally {
             this.setInputEnabled(true);
             this.messageInput.focus();
@@ -321,6 +613,8 @@ class ChatClient {
     setInputEnabled(enabled) {
         this.messageInput.disabled = !enabled;
         this.sendButton.disabled = !enabled;
+        this.attachBtn.disabled = !enabled;
+        this.fileInput.disabled = !enabled;
     }
     
     extractTextFromContent(data) {
@@ -336,9 +630,9 @@ class ChatClient {
             if (data.message) return this.extractTextFromContent(data.message);
             const parts = [];
             for (const k of Object.keys(data)) {
-                // Skip internal metadata fields if needed, but for now just extract everything that looks like text
                 if (k === 'type' && data[k] === 'user_message') continue;
                 if (k === 'timestamp') continue;
+                if (k === 'files') continue;
                 const t = this.extractTextFromContent(data[k]);
                 if (t && t.trim() !== '') parts.push(t);
             }
@@ -347,7 +641,7 @@ class ChatClient {
         return '';
     }
 
-    createMessageElement(content, isUser, isOtherUser = false) {
+    createMessageElement(content, isUser, isOtherUser = false, files = []) {
         const messageDiv = document.createElement('div');
         let className = 'message';
         if (isUser) className += ' user-message';
@@ -383,6 +677,20 @@ class ChatClient {
                  contentDiv.textContent = content;
              }
         }
+        
+        // Files
+        if (files && files.length > 0) {
+            const filesDiv = document.createElement('div');
+            filesDiv.className = 'message-files';
+            files.forEach(file => {
+                 const name = file.split('/').pop().replace(/^[0-9a-f-]+_/, ''); // Try to clean uuid?
+                 const fileEl = document.createElement('div');
+                 fileEl.textContent = `📎 ${name}`;
+                 fileEl.className = 'file-attachment';
+                 filesDiv.appendChild(fileEl);
+            });
+            contentDiv.appendChild(filesDiv);
+        }
 
         innerDiv.appendChild(avatarDiv);
         innerDiv.appendChild(contentDiv);
@@ -391,21 +699,45 @@ class ChatClient {
         return messageDiv;
     }
 
-    displayUserMessage(content) {
-        const msgEl = this.createMessageElement(content, true);
+    displayUserMessage(content, files = [], save = true) {
+        if (save) {
+            if (!this.sessionMessages[this.sessionId]) this.sessionMessages[this.sessionId] = [];
+            this.sessionMessages[this.sessionId].push({
+                type: 'user', isOther: false, content, files, timestamp: Date.now()
+            });
+            this.saveState();
+        }
+
+        const msgEl = this.createMessageElement(content, true, false, files);
         this.chatMessages.appendChild(msgEl);
         this.scrollToBottom();
     }
     
-    displayOtherUserMessage(content) {
-        const msgEl = this.createMessageElement(content, false, true);
+    displayOtherUserMessage(content, files = [], save = true) {
+        if (save) {
+            if (!this.sessionMessages[this.sessionId]) this.sessionMessages[this.sessionId] = [];
+            this.sessionMessages[this.sessionId].push({
+                type: 'user', isOther: true, content, files, timestamp: Date.now()
+            });
+            this.saveState();
+        }
+
+        const msgEl = this.createMessageElement(content, false, true, files);
         this.chatMessages.appendChild(msgEl);
         this.scrollToBottom();
     }
 
-    displayBotMessage(messageData) {
+    displayBotMessage(messageData, save = true) {
         const contentText = this.extractTextFromContent(messageData?.content ?? messageData);
         const content = contentText && contentText.trim() !== '' ? contentText : JSON.stringify(messageData, null, 2);
+
+        if (save) {
+            if (!this.sessionMessages[this.sessionId]) this.sessionMessages[this.sessionId] = [];
+            this.sessionMessages[this.sessionId].push({
+                type: 'bot', content: content, timestamp: Date.now()
+            });
+            this.saveState();
+        }
 
         const msgEl = this.createMessageElement(content, false);
         this.chatMessages.appendChild(msgEl);
@@ -437,7 +769,6 @@ class ChatClient {
     }
 }
 
-// Initialize
 document.addEventListener('DOMContentLoaded', () => {
     window.chatClient = new ChatClient();
 });

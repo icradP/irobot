@@ -2,15 +2,15 @@ use crate::core::decision_engine::DecisionEngine;
 use crate::core::output_handler::OutputHandler;
 use crate::core::persona::Persona;
 use crate::core::router::{EventRouter, HandlerId};
+use crate::core::sessions::web_session::WebSession;
 use crate::core::workflow_engine::WorkflowEngine;
 use crate::mcp::client::MCPClient;
 use crate::utils::InputEvent;
-use crate::core::sessions::web_session::WebSession;
 use async_trait::async_trait;
 use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock as StdRwLock};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tracing::{error, info};
 
 pub enum SessionMessage {
@@ -58,12 +58,14 @@ impl RobotSession {
     }
 
     async fn handle_input(&mut self, event: InputEvent) {
-
         info!("Session {} processing event from {}", self.id, event.source);
 
         // check if consumed
         if crate::utils::check_and_remove_consumed_event(&event.id) {
-            info!("Skipping event {} as it was consumed by MCP elicitation", event.id);
+            info!(
+                "Skipping event {} as it was consumed by MCP elicitation",
+                event.id
+            );
             return;
         }
 
@@ -72,11 +74,16 @@ impl RobotSession {
             Ok(plan) => {
                 info!("Plan decided for session {}: {:?}", self.id, plan);
 
-                let input_text = if let Some(line) =
-                    event.payload.get("line").and_then(|v: &serde_json::Value| v.as_str())
+                let input_text = if let Some(line) = event
+                    .payload
+                    .get("line")
+                    .and_then(|v: &serde_json::Value| v.as_str())
                 {
                     line.to_string()
-                } else if let Some(content) = event.payload.get("content").and_then(|v: &serde_json::Value| v.as_str())
+                } else if let Some(content) = event
+                    .payload
+                    .get("content")
+                    .and_then(|v: &serde_json::Value| v.as_str())
                 {
                     content.to_string()
                 } else {
@@ -113,7 +120,7 @@ impl RobotSession {
                         self.workflow_engine.resolver.clone(),
                     );
                     let res = step.run(&mut ctx, &*self.mcp_client).await;
-                    
+
                     match res {
                         Ok(res) => {
                             if let Some(mut o) = res.output {
@@ -121,12 +128,12 @@ impl RobotSession {
                                 if o.session_id.is_none() {
                                     o.session_id = Some(self.id.clone());
                                 }
-            
+
                                 info!(
                                     "workflow step produced output, dispatching to {} handlers",
                                     target_ids.len()
                                 );
-                                
+
                                 // Dispatch output
                                 // Note: We acquire read lock briefly to get handlers, then emit
                                 // Ideally we should clone handlers if possible to avoid holding lock during emit
@@ -156,7 +163,7 @@ impl RobotSession {
                         }
                     }
                 }
-            },
+            }
             Err(e) => {
                 error!("Error deciding plan: {}", e);
             }
@@ -167,7 +174,7 @@ impl RobotSession {
 pub struct SessionManager {
     sessions: RwLock<HashMap<String, mpsc::UnboundedSender<SessionMessage>>>,
     factory: Arc<super::McpClientFactory>,
-    
+
     // Dependencies for spawning sessions
     decision_engine: Arc<Box<dyn DecisionEngine + Send + Sync>>,
     workflow_engine: Arc<WorkflowEngine>,
@@ -197,8 +204,11 @@ impl SessionManager {
     }
 
     pub async fn dispatch(&self, event: InputEvent) {
-        let session_id = event.session_id.clone().unwrap_or_else(|| event.source.clone());
-        
+        let session_id = event
+            .session_id
+            .clone()
+            .unwrap_or_else(|| event.source.clone());
+
         // Fast path: check if session exists with read lock
         {
             let guard = self.sessions.read().await;
@@ -246,11 +256,17 @@ impl SessionManager {
                 // Store sender and dispatch
                 guard.insert(session_id.clone(), tx.clone());
                 if let Err(e) = tx.send(SessionMessage::Input(event)) {
-                    error!("Failed to dispatch event to new session {}: {}", session_id, e);
+                    error!(
+                        "Failed to dispatch event to new session {}: {}",
+                        session_id, e
+                    );
                 }
             }
             Err(e) => {
-                error!("Failed to create MCP client for session {}: {}", session_id, e);
+                error!(
+                    "Failed to create MCP client for session {}: {}",
+                    session_id, e
+                );
             }
         }
     }

@@ -1,10 +1,10 @@
 use crate::core::persona::{OutputStyle, Persona};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
-use tokio::sync::broadcast;
-use std::sync::{OnceLock, Mutex};
 use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+use tokio::sync::broadcast;
+use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InputEvent {

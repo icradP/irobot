@@ -60,26 +60,70 @@ body {
 .history-list {
     flex: 1;
     overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
 }
 
 .nav-item {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.75rem;
+    justify-content: space-between;
     color: var(--text-primary);
-    cursor: pointer;
     border-radius: 0.375rem;
     transition: background-color 0.2s;
     font-size: 0.875rem;
-    margin-top: auto;
     border: none;
     background: none;
     width: 100%;
+    text-align: left;
+    padding: 0;
 }
 
 .nav-item:hover {
     background-color: var(--hover-color);
+}
+
+.nav-item.active {
+    background-color: var(--input-bg);
+}
+
+.nav-item-content {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    flex: 1;
+    overflow: hidden;
+    cursor: pointer;
+}
+
+.delete-chat-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    padding: 0.75rem;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.2s, color 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.nav-item:hover .delete-chat-btn {
+    opacity: 1;
+}
+
+.delete-chat-btn:hover {
+    color: #ef4444;
+}
+
+.text-truncate {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
 }
 
 /* Connection Status Dot */
@@ -253,16 +297,22 @@ textarea {
     resize: none;
     max-height: 200px;
     outline: none;
-    padding-right: 2.5rem;
+    padding-right: 5rem; /* Make room for buttons */
     line-height: 1.5;
     height: 24px;
     width: 100%;
 }
 
-.send-btn {
+.input-actions {
     position: absolute;
     bottom: 0.75rem;
     right: 0.75rem;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.send-btn, .action-btn {
     background: transparent;
     border: none;
     color: var(--text-secondary);
@@ -275,7 +325,7 @@ textarea {
     justify-content: center;
 }
 
-.send-btn:hover:not(:disabled) {
+.send-btn:hover:not(:disabled), .action-btn:hover {
     background-color: var(--bg-color);
     color: var(--text-primary);
 }
@@ -283,6 +333,47 @@ textarea {
 .send-btn:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+}
+
+.file-preview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding-top: 0.5rem;
+    margin-top: 0.5rem;
+    border-top: 1px solid rgba(255,255,255,0.1);
+}
+
+.file-chip {
+    background: var(--bg-color);
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border: 1px solid var(--border-color);
+}
+
+.file-chip .remove-file {
+    cursor: pointer;
+    color: #ef4444;
+    font-weight: bold;
+}
+
+.message-files {
+    margin-top: 0.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.file-attachment {
+    background: rgba(0,0,0,0.2);
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
 }
 
 .footer-text {

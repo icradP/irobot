@@ -1,21 +1,28 @@
 use anyhow::Result;
-use rmcp::{
-    model::{object, CallToolRequestParam, CallToolResult, Tool, CreateElicitationRequestParam, CreateElicitationResult, ElicitationAction},
-    service::{RequestContext, RoleClient, RoleServer, RunningService},
-    ServiceExt,
-};
-use rmcp::model::{ClientCapabilities, ClientInfo, Implementation};
-use std::sync::{Arc};
-use std::borrow::Cow;
-use tokio::sync::Mutex;
 use futures::future::BoxFuture;
-use schemars::JsonSchema;
-use serde::{Serialize, Deserialize};
+use rmcp::model::{ClientCapabilities, ClientInfo, Implementation};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransport;
+use rmcp::{
+    ServiceExt,
+    model::{
+        CallToolRequestParam, CallToolResult, CreateElicitationRequestParam,
+        CreateElicitationResult, ElicitationAction, Tool, object,
+    },
+    service::{RequestContext, RoleClient, RoleServer, RunningService},
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-type BridgeFn = Arc<dyn Fn(String, serde_json::Value) -> BoxFuture<'static, Result<Option<serde_json::Value>>> + Send + Sync>;
+type BridgeFn = Arc<
+    dyn Fn(String, serde_json::Value) -> BoxFuture<'static, Result<Option<serde_json::Value>>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ExternalConfig {
@@ -30,6 +37,7 @@ pub struct BridgeShared {
 pub struct BridgeRaw {
     pub raw: String,
 }
+impl rmcp::service::ElicitationSafe for BridgeRaw {}
 
 pub struct BridgeClientHandler {
     info: ClientInfo,
@@ -62,16 +70,24 @@ impl rmcp::handler::client::ClientHandler for BridgeClientHandler {
         &self,
         request: CreateElicitationRequestParam,
         _context: RequestContext<RoleClient>,
-    ) -> impl std::future::Future<Output = Result<CreateElicitationResult, rmcp::ErrorData>> + Send + '_ {
+    ) -> impl std::future::Future<Output = Result<CreateElicitationResult, rmcp::ErrorData>> + Send + '_
+    {
         async move {
-            let schema_str = serde_json::to_string_pretty(&request.requested_schema).unwrap_or_default();
+            let schema_str =
+                serde_json::to_string_pretty(&request.requested_schema).unwrap_or_default();
             let msg = format!(
                 "外部服务器请求参数引导：{}\nSchema:\n{}\n请提供 JSON 或自然语言描述。",
                 request.message, schema_str
             );
             let hook_opt = { self.shared.hook.lock().await.clone() };
             if let Some(hook) = hook_opt {
-                match hook(msg, serde_json::to_value(&request.requested_schema).unwrap_or(serde_json::Value::Null)).await {
+                match hook(
+                    msg,
+                    serde_json::to_value(&request.requested_schema)
+                        .unwrap_or(serde_json::Value::Null),
+                )
+                .await
+                {
                     Ok(Some(mut v)) => {
                         // If user provided a JSON string, try to parse into JSON
                         if let serde_json::Value::String(s) = &v {
@@ -84,25 +100,39 @@ impl rmcp::handler::client::ClientHandler for BridgeClientHandler {
                             content: Some(v),
                         })
                     }
-                    Ok(None) => Ok(CreateElicitationResult { action: ElicitationAction::Accept, content: None }),
-                    Err(e) => Err(rmcp::ErrorData::internal_error(format!("桥接引导失败: {}", e), None)),
+                    Ok(None) => Ok(CreateElicitationResult {
+                        action: ElicitationAction::Accept,
+                        content: None,
+                    }),
+                    Err(e) => Err(rmcp::ErrorData::internal_error(
+                        format!("桥接引导失败: {}", e),
+                        None,
+                    )),
                 }
             } else {
-                Ok(CreateElicitationResult { action: ElicitationAction::Accept, content: None })
+                Ok(CreateElicitationResult {
+                    action: ElicitationAction::Accept,
+                    content: None,
+                })
             }
         }
     }
 }
 
 pub struct ExternalManager {
-    clients: Vec<(String, RunningService<RoleClient, BridgeClientHandler>, Arc<BridgeShared>)>,
+    clients: Vec<(
+        String,
+        RunningService<RoleClient, BridgeClientHandler>,
+        Arc<BridgeShared>,
+    )>,
 }
 
 impl ExternalManager {
     pub async fn new_from_config() -> Result<Self> {
         let mut clients = Vec::new();
         let default_path = "config/external.toml";
-        let path = std::env::var("ROBOT_MCP_EXTERNALS_CONFIG").unwrap_or_else(|_| default_path.to_string());
+        let path = std::env::var("ROBOT_MCP_EXTERNALS_CONFIG")
+            .unwrap_or_else(|_| default_path.to_string());
         let p = Path::new(&path);
         if !p.exists() {
             tracing::warn!("外部配置文件不存在: {}，将不加载外部服务", path);
@@ -115,7 +145,9 @@ impl ExternalManager {
             if addr.is_empty() {
                 continue;
             }
-            let shared = Arc::new(BridgeShared { hook: Arc::new(Mutex::new(None)) });
+            let shared = Arc::new(BridgeShared {
+                hook: Arc::new(Mutex::new(None)),
+            });
             let handler = BridgeClientHandler::new(shared.clone());
             if addr.starts_with("http://") || addr.starts_with("https://") {
                 let transport = StreamableHttpClientTransport::from_uri(addr);
@@ -149,7 +181,9 @@ impl ExternalManager {
         let mut clients = Vec::new();
         let list = std::env::var("ROBOT_MCP_EXTERNALS").unwrap_or_default();
         for addr in list.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            let shared = Arc::new(BridgeShared { hook: Arc::new(Mutex::new(None)) });
+            let shared = Arc::new(BridgeShared {
+                hook: Arc::new(Mutex::new(None)),
+            });
             let handler = BridgeClientHandler::new(shared.clone());
             if addr.starts_with("http://") || addr.starts_with("https://") {
                 let transport = StreamableHttpClientTransport::from_uri(addr);
@@ -218,26 +252,32 @@ impl ExternalManager {
                     {
                         let mut lock = shared.hook.lock().await;
                         let ctx = server_context.clone();
-                        let func: BridgeFn = Arc::new(move |message: String, _schema: serde_json::Value| {
-                            let ctx = ctx.clone();
-                            Box::pin(async move {
-                                // Ask user for a raw JSON string; external schema embedded in message
-                                match ctx.peer.elicit::<BridgeRaw>(message).await {
-                                    Ok(opt) => {
-                                        if let Some(br) = opt {
-                                            // Try parse to JSON
-                                            match serde_json::from_str::<serde_json::Value>(&br.raw) {
-                                                Ok(v) => Ok(Some(v)),
-                                                Err(e) => Err(anyhow::anyhow!(format!("JSON解析失败: {}", e))),
+                        let func: BridgeFn =
+                            Arc::new(move |message: String, _schema: serde_json::Value| {
+                                let ctx = ctx.clone();
+                                Box::pin(async move {
+                                    // Ask user for a raw JSON string; external schema embedded in message
+                                    match ctx.peer.elicit::<BridgeRaw>(message).await {
+                                        Ok(opt) => {
+                                            if let Some(br) = opt {
+                                                // Try parse to JSON
+                                                match serde_json::from_str::<serde_json::Value>(
+                                                    &br.raw,
+                                                ) {
+                                                    Ok(v) => Ok(Some(v)),
+                                                    Err(e) => Err(anyhow::anyhow!(format!(
+                                                        "JSON解析失败: {}",
+                                                        e
+                                                    ))),
+                                                }
+                                            } else {
+                                                Ok(None)
                                             }
-                                        } else {
-                                            Ok(None)
                                         }
+                                        Err(e) => Err(anyhow::anyhow!(e.to_string())),
                                     }
-                                    Err(e) => Err(anyhow::anyhow!(e.to_string())),
-                                }
-                            })
-                        });
+                                })
+                            });
                         *lock = Some(func);
                     }
                     let arguments = match args {
@@ -249,15 +289,16 @@ impl ExternalManager {
                             name: tool.into(),
                             arguments,
                         })
-                        .await {
-                            Ok(r) => r,
-                            Err(e) => {
-                                // clear hook on error as well
-                                let mut lock = shared.hook.lock().await;
-                                *lock = None;
-                                return Err(anyhow::anyhow!(e.to_string()));
-                            }
-                        };
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            // clear hook on error as well
+                            let mut lock = shared.hook.lock().await;
+                            *lock = None;
+                            return Err(anyhow::anyhow!(e.to_string()));
+                        }
+                    };
                     {
                         let mut lock = shared.hook.lock().await;
                         *lock = None;

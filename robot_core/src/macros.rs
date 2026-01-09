@@ -1,7 +1,7 @@
 /// 处理器自动注册和路由配置的宏
-/// 
+///
 /// 使用示例:
-/// ```rust
+/// ```rust,ignore
 /// register_handlers!(core => {
 ///     ConsoleHandler: (ConsoleInput, ConsoleOutput) -> [ConsoleHandler, WebHandler],
 ///     WebHandler: (WebInput::new(8080).await?, WebOutput::new(8081).await?) -> [WebHandler],
@@ -20,7 +20,7 @@ macro_rules! register_handlers {
                     $crate::core::router::HandlerId::of::<$handler_type>(),
                     Box::new($output),
                 ).await;
-                
+
                 $core.route().add_source_route::<$handler_type>(vec![
                     $($crate::core::router::HandlerId::of::<$route>()),+
                 ]);

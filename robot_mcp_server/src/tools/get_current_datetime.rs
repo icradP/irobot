@@ -1,18 +1,19 @@
 //获取当前日期时间
+use crate::tools::ToolEntry;
 use crate::tools::to_object;
+use chrono::Local;
 use rmcp::{
+    ErrorData,
     model::*,
     service::{RequestContext, RoleServer},
-    ErrorData,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use chrono::Local;
-use crate::tools::ToolEntry;
 use std::sync::Arc;
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[schemars(description = "Get current datetime")]
 pub struct GetCurrentDatetimeRequest;
+impl rmcp::service::ElicitationSafe for GetCurrentDatetimeRequest {}
 
 pub fn tool() -> ToolEntry {
     let schema = schemars::schema_for!(GetCurrentDatetimeRequest);

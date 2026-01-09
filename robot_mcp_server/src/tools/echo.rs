@@ -1,13 +1,13 @@
+use crate::tools::ToolEntry;
 use crate::tools::to_object;
 use rmcp::{
+    ErrorData,
     model::*,
     service::{RequestContext, RoleServer},
-    ErrorData,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::tools::ToolEntry;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[schemars(description = "Echo message request")]
@@ -15,6 +15,8 @@ pub struct EchoRequest {
     #[schemars(description = "Message to echo back")]
     pub message: String,
 }
+
+impl rmcp::service::ElicitationSafe for EchoRequest {}
 
 pub fn tool() -> ToolEntry {
     let schema = schemars::schema_for!(EchoRequest);

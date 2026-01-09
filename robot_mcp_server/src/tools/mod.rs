@@ -1,6 +1,10 @@
-use rmcp::{ErrorData, model::*, service::{RequestContext, RoleServer}};
-use std::{collections::HashMap, future::Future, pin::Pin};
+use rmcp::{
+    ErrorData,
+    model::*,
+    service::{RequestContext, RoleServer},
+};
 use std::sync::{Arc, Mutex};
+use std::{collections::HashMap, future::Future, pin::Pin};
 
 pub fn to_object(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     match v {
@@ -17,25 +21,26 @@ pub struct AppState {
 
 pub mod chat;
 pub mod echo;
+pub mod ffprobe;
+pub mod get_current_datetime;
 pub mod get_weather;
 pub mod profile;
 pub mod sum;
-pub mod get_current_datetime;
-
-
-pub use chat::ChatRequest;
-pub use echo::EchoRequest;
-pub use get_weather::GetWeatherRequest;
-pub use profile::{ProfileGetRequest, ProfileUpdateRequest};
-pub use sum::SumRequest;
-pub use get_current_datetime::GetCurrentDatetimeRequest;
 
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<CallToolResult, ErrorData>> + Send>>;
 
 pub struct ToolEntry {
     pub name: &'static str,
     pub tool: Tool,
-    pub handler: Arc<dyn Fn(Option<serde_json::Value>, RequestContext<RoleServer>, Arc<Mutex<AppState>>) -> HandlerFuture + Send + Sync>,
+    pub handler: Arc<
+        dyn Fn(
+                Option<serde_json::Value>,
+                RequestContext<RoleServer>,
+                Arc<Mutex<AppState>>,
+            ) -> HandlerFuture
+            + Send
+            + Sync,
+    >,
 }
 
 pub fn all_entries() -> Vec<ToolEntry> {
@@ -47,6 +52,7 @@ pub fn all_entries() -> Vec<ToolEntry> {
         chat::tool(),
         get_weather::tool(),
         get_current_datetime::tool(),
+        ffprobe::tool(),
     ]
 }
 
@@ -65,5 +71,8 @@ pub async fn dispatch(
             return (entry.handler)(args, context, state).await;
         }
     }
-    Err(ErrorData::invalid_params(format!("未知工具: {}", name), None))
+    Err(ErrorData::invalid_params(
+        format!("未知工具: {}", name),
+        None,
+    ))
 }

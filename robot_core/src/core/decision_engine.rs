@@ -1,9 +1,9 @@
 use crate::core::persona::Persona;
-use crate::utils::{InputEvent, StepSpec, WorkflowPlan};
-use async_trait::async_trait;
 use crate::llm::adapter::{ChatMessage, ChatRequest, LLMClient};
 use crate::mcp::client::MCPClient;
 use crate::mcp::registry::ToolMeta;
+use crate::utils::{InputEvent, StepSpec, WorkflowPlan};
+use async_trait::async_trait;
 use serde_json::Value;
 use tracing::info;
 
@@ -16,8 +16,14 @@ pub struct BasicDecisionEngine;
 
 #[async_trait]
 impl DecisionEngine for BasicDecisionEngine {
-    async fn decide(&self, _persona: &Persona, _input: &InputEvent) -> anyhow::Result<WorkflowPlan> {
-        let plan = WorkflowPlan { steps: vec![StepSpec::Memory, StepSpec::Profile, StepSpec::Relationship] };
+    async fn decide(
+        &self,
+        _persona: &Persona,
+        _input: &InputEvent,
+    ) -> anyhow::Result<WorkflowPlan> {
+        let plan = WorkflowPlan {
+            steps: vec![StepSpec::Memory, StepSpec::Profile, StepSpec::Relationship],
+        };
         info!("decision_engine plan: {:?}", plan);
         Ok(plan)
     }
@@ -32,7 +38,11 @@ pub struct LLMDecisionEngine {
 }
 
 impl LLMDecisionEngine {
-    pub fn new(llm: Box<dyn LLMClient + Send + Sync>, model: String, mcp: Arc<dyn MCPClient + Send + Sync>) -> Self {
+    pub fn new(
+        llm: Box<dyn LLMClient + Send + Sync>,
+        model: String,
+        mcp: Arc<dyn MCPClient + Send + Sync>,
+    ) -> Self {
         Self { llm, model, mcp }
     }
 }
@@ -41,28 +51,43 @@ impl LLMDecisionEngine {
 impl DecisionEngine for LLMDecisionEngine {
     async fn decide(&self, _persona: &Persona, input: &InputEvent) -> anyhow::Result<WorkflowPlan> {
         let tools: Vec<ToolMeta> = self.mcp.list_tools().await.unwrap_or_default();
-        info!("DecisionEngine detected MCP tools: {:?}", tools);
+        // 结构化打印工具列表
+        if tools.is_empty() {
+            info!("DecisionEngine detected MCP tools: []");
+        } else {
+            info!("DecisionEngine detected MCP tools:");
+            for (idx, tool) in tools.iter().enumerate() {
+                info!(
+                    "  [{}] name={} description={}",
+                    idx, tool.name, tool.description
+                );
+            }
+        }
+
         let tool_descriptions: Vec<String> = tools
             .iter()
             .map(|t| format!("{}: {}", t.name, t.description))
             .collect();
-        
+
         // Extract text based on source metadata or fallback to known patterns
         let text = if let Some(meta) = &input.source_meta {
-            input.payload
+            input
+                .payload
                 .get(&meta.content_field)
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string()
         } else {
             // Fallback to console format
-            input.payload.get("line")
+            input
+                .payload
+                .get("line")
                 .or_else(|| input.payload.get("content"))
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string()
         };
-        
+
         let source_context = if let Some(meta) = &input.source_meta {
             format!(
                 "Input Source: {}\nFormat: {}\nDescription: {}\n",
@@ -71,7 +96,7 @@ impl DecisionEngine for LLMDecisionEngine {
         } else {
             "Input Source: unknown\n".to_string()
         };
-        
+
         let system = format!(
             "{}You are a smart workflow planner. Your goal is to select the minimal and optimal set of tools to fulfill the user's request.\n\
             Available Steps: [\"Memory\",\"Profile\",\"Relationship\"].\n\
@@ -90,15 +115,20 @@ impl DecisionEngine for LLMDecisionEngine {
             4. Use [Memory] or [Profile] tools if the request involves remembering facts or accessing user data.\n\
             5. Choose ONLY the necessary tools. Avoid redundant steps.\n\
             6. Return a pure JSON array of strings representing the sequence of steps. No explanation.",
-            source_context,
-            tool_descriptions
+            source_context, tool_descriptions
         );
         let user = format!("Input: {}\nReturn steps:", text);
         let req = ChatRequest {
             model: self.model.clone(),
             messages: vec![
-                ChatMessage { role: "system".into(), content: system.into() },
-                ChatMessage { role: "user".into(), content: user },
+                ChatMessage {
+                    role: "system".into(),
+                    content: system.into(),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: user,
+                },
             ],
             temperature: Some(0.2),
         };
