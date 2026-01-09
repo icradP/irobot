@@ -9,6 +9,7 @@ use robot_core::core::{
 use robot_core::llm::lmstudio::LMStudioClient;
 use robot_core::mcp::rmcp_client::RmcpStdIoClient;
 use robot_core::tentacles::web_console::{WebHandler, WebInput, WebOutput};
+use robot_core::tentacles::tcp_console::{TcpHandler, TcpInput};
 use robot_core::workflow_steps::LlmParameterResolver;
 use std::sync::Arc;
 use tracing_subscriber;
@@ -90,6 +91,15 @@ async fn main() -> anyhow::Result<()> {
             WebInput::new(8080).await?,
             WebOutput::new(8081).await?
         ) -> [WebHandler],
+    });
+
+    let (tcp_input, tcp_output, _) = TcpInput::new(9000).await?;
+
+    register_handlers!(core => {
+        TcpHandler: (
+            tcp_input,
+            tcp_output
+        ) -> [TcpHandler],
     });
 
     loop {
