@@ -167,34 +167,45 @@ impl ParameterResolver for LlmParameterResolver {
             )
         })?;
 
-        // // Validate required fields - if any are null, it means LLM couldn't extract them
-        // if let Some(obj) = v.as_object() {
-        //     let mut missing_fields = Vec::new();
-        //     for field in &required_fields {
-        //         if let Some(val) = obj.get(field) {
-        //             if val.is_null() {
-        //                 missing_fields.push(field.clone());
-        //             }
-        //         } else {
-        //             missing_fields.push(field.clone());
-        //         }
-        //     }
-
-        //     if !missing_fields.is_empty() {
-        //         tracing::warn!(
-        //             "LlmParameterResolver: required fields {:?} are missing or null. User input was: '{}'. Will return null for these fields to trigger elicit.",
-        //             missing_fields,
-        //             input_text
-        //         );
-        //         // Set missing required fields to null so the tool can trigger elicit
-        //         if let Some(obj) = v.as_object_mut() {
-        //             for field in missing_fields {
-        //                 obj.insert(field, serde_json::Value::Null);
-        //             }
-        //         }
-        //     }
-        // }
+        let mut v = v;
+        normalize_null_strings(&mut v);
+        ensure_required_fields_present(&mut v, &required_fields);
         Ok(v)
+    }
+}
+
+fn normalize_null_strings(v: &mut Value) {
+    match v {
+        Value::String(s) => {
+            if s.trim().eq_ignore_ascii_case("null") {
+                *v = Value::Null;
+            }
+        }
+        Value::Array(arr) => {
+            for it in arr {
+                normalize_null_strings(it);
+            }
+        }
+        Value::Object(map) => {
+            for (_k, val) in map.iter_mut() {
+                normalize_null_strings(val);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn ensure_required_fields_present(v: &mut Value, required_fields: &[String]) {
+    let Some(obj) = v.as_object_mut() else {
+        return;
+    };
+    for field in required_fields {
+        match obj.get(field) {
+            Some(val) if !val.is_null() => {}
+            _ => {
+                obj.insert(field.clone(), Value::Null);
+            }
+        }
     }
 }
 

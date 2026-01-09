@@ -8,10 +8,11 @@ use futures::future::BoxFuture;
 use rmcp::{
     ServiceExt,
     model::{
-        CallToolRequestParam, ClientCapabilities, ClientInfo, CreateElicitationRequestParam,
-        CreateElicitationResult, ElicitationAction, Implementation, ListRootsResult, Root,
+        CallToolRequest, CallToolRequestParam, CancelledNotificationParam, ClientCapabilities,
+        ClientInfo, ClientRequest, CreateElicitationRequestParam, CreateElicitationResult,
+        ElicitationAction, Implementation, ListRootsResult, RequestId, Root, ServerResult,
     },
-    service::{RequestContext, RoleClient, RunningService},
+    service::{PeerRequestOptions, RequestContext, RoleClient, RunningService, ServiceError},
 };
 use std::sync::{Arc, Mutex};
 
@@ -39,6 +40,28 @@ pub struct SharedCtx {
     pub last_elicitation_message: Option<String>,
     pub last_elicitation_schema: Option<serde_json::Value>,
     pub preview_only: bool,
+    pub current_call_tool_request_id: Option<RequestId>,
+}
+
+fn is_cancel_text(s: &str) -> bool {
+    let t = s.trim().to_ascii_lowercase();
+    if t.is_empty() {
+        return false;
+    }
+    let cancel_words = [
+        "算了",
+        "不用了",
+        "取消",
+        "停止",
+        "不需要了",
+        "stop",
+        "cancel",
+        "never mind",
+        "nevermind",
+        "quit",
+        "exit",
+    ];
+    cancel_words.iter().any(|w| t.contains(w))
 }
 
 impl rmcp::handler::client::ClientHandler for RobotClientHandler {
@@ -49,7 +72,7 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
     fn create_elicitation(
         &self,
         request: CreateElicitationRequestParam,
-        _context: RequestContext<RoleClient>,
+        context: RequestContext<RoleClient>,
     ) -> impl std::future::Future<Output = Result<CreateElicitationResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
@@ -108,6 +131,38 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
             } else {
                 input_event.payload.to_string()
             };
+
+            if is_cancel_text(&input) {
+                crate::utils::mark_event_consumed(input_event.id);
+                let output_event = OutputEvent {
+                    target: "default".into(),
+                    source: "mcp".into(),
+                    session_id: Some(sid.clone()),
+                    content: serde_json::json!({
+                        "type": "tool_cancel",
+                        "message": "已取消本次工具调用"
+                    }),
+                    style: OutputStyle::Neutral,
+                };
+                let _ = output_bus().send(output_event);
+                let request_id = {
+                    let guard = self.shared.lock().unwrap();
+                    guard.current_call_tool_request_id.clone()
+                };
+                if let Some(request_id) = request_id {
+                    let _ = context
+                        .peer
+                        .notify_cancelled(CancelledNotificationParam {
+                            request_id,
+                            reason: Some("user cancelled".to_string()),
+                        })
+                        .await;
+                }
+                return Ok(CreateElicitationResult {
+                    action: ElicitationAction::Cancel,
+                    content: None,
+                });
+            }
 
             // Try to parse as JSON first
             let parsed: serde_json::Value = match serde_json::from_str(&input) {
@@ -361,9 +416,16 @@ impl MCPClient for RmcpStdIoClient {
             args
         );
 
-        // Check if arguments contain null values - if so, don't pass them to trigger elicitation
+        // Check if arguments contain missing values - if so, don't pass them to trigger elicitation
         let should_elicit = if let serde_json::Value::Object(ref obj) = args {
-            obj.values().any(|v| v.is_null())
+            obj.values().any(|v| match v {
+                serde_json::Value::Null => true,
+                serde_json::Value::String(s) => {
+                    let t = s.trim();
+                    t.is_empty() || t.eq_ignore_ascii_case("null")
+                }
+                _ => false,
+            })
         } else {
             false
         };
@@ -376,7 +438,21 @@ impl MCPClient for RmcpStdIoClient {
                 "RmcpStdIoClient: arguments contain null values for tool '{}', passing None to trigger elicitation",
                 tool
             );
-            None
+            if let serde_json::Value::Object(obj) = &args {
+                let mut meta = serde_json::Map::new();
+                for (k, v) in obj.iter() {
+                    if k == "session_id" || k.starts_with("__") {
+                        meta.insert(k.clone(), v.clone());
+                    }
+                }
+                if meta.is_empty() {
+                    None
+                } else {
+                    Some(rmcp::model::object(serde_json::Value::Object(meta)))
+                }
+            } else {
+                None
+            }
         } else if args.is_object() {
             Some(rmcp::model::object(args))
         } else {
@@ -389,16 +465,66 @@ impl MCPClient for RmcpStdIoClient {
         };
 
         let tool_name = tool.to_string();
-        let result = self
+        let shared = self.shared.clone();
+        let result: rmcp::model::CallToolResult = match self
             .with_service_retry("call_tool", move |svc| {
                 let arguments = arguments.clone();
                 let tool_name = tool_name.clone();
-                Box::pin(svc.call_tool(CallToolRequestParam {
-                    name: tool_name.into(),
-                    arguments,
-                }))
+                let shared = shared.clone();
+                Box::pin(async move {
+                    let request = ClientRequest::CallToolRequest(CallToolRequest {
+                        method: Default::default(),
+                        params: CallToolRequestParam {
+                            name: tool_name.clone().into(),
+                            arguments,
+                        },
+                        extensions: Default::default(),
+                    });
+
+                    let handle = svc
+                        .send_cancellable_request(request, PeerRequestOptions::no_options())
+                        .await?;
+                    {
+                        let mut guard = shared.lock().unwrap();
+                        guard.current_call_tool_request_id = Some(handle.id.clone());
+                    }
+
+                    let response = match handle.await_response().await {
+                        Ok(r) => r,
+                        Err(ServiceError::Cancelled { reason }) => {
+                            let msg = format!(
+                                "tool_cancel\nname={}\nmessage={}",
+                                tool_name,
+                                reason.unwrap_or_else(|| "用户取消了本次工具调用".to_string())
+                            );
+                            return Ok(rmcp::model::CallToolResult::success(vec![
+                                rmcp::model::Content::text(msg),
+                            ]));
+                        }
+                        Err(e) => return Err(e),
+                    };
+
+                    match response {
+                        ServerResult::CallToolResult(r) => Ok(r),
+                        _ => Err(ServiceError::UnexpectedResponse),
+                    }
+                })
             })
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                {
+                    let mut guard = self.shared.lock().unwrap();
+                    guard.current_call_tool_request_id = None;
+                }
+                return Err(e);
+            }
+        };
+        {
+            let mut guard = self.shared.lock().unwrap();
+            guard.current_call_tool_request_id = None;
+        }
         let val = serde_json::to_value(&result)?;
         {
             let mut guard = self.shared.lock().unwrap();

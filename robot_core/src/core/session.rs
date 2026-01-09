@@ -1,5 +1,7 @@
 use crate::core::decision_engine::DecisionEngine;
+use crate::core::intent::{IntentDecision, IntentModule};
 use crate::core::output_handler::OutputHandler;
+use crate::core::perception::PerceptionModule;
 use crate::core::persona::Persona;
 use crate::core::router::{EventRouter, HandlerId};
 use crate::core::sessions::web_session::WebSession;
@@ -10,7 +12,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock as StdRwLock};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info};
 
 pub enum SessionMessage {
@@ -29,6 +31,8 @@ pub struct RobotSession {
     pub mcp_client: Arc<dyn MCPClient + Send + Sync>,
     pub decision_engine: Arc<Box<dyn DecisionEngine + Send + Sync>>,
     pub workflow_engine: Arc<WorkflowEngine>,
+    pub perception_module: Arc<Box<dyn PerceptionModule + Send + Sync>>,
+    pub intent_module: Arc<Box<dyn IntentModule + Send + Sync>>,
     pub persona: Arc<Persona>,
     pub output_handlers: Arc<RwLock<HashMap<HandlerId, Box<dyn OutputHandler + Send + Sync>>>>,
     pub router: Arc<StdRwLock<EventRouter>>,
@@ -69,26 +73,57 @@ impl RobotSession {
             return;
         }
 
+        // 1. Perception Layer
+        let perception = match self.perception_module.perceive(&event).await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Perception failed: {}", e);
+                return;
+            }
+        };
+        info!("Perception Result: {:?}", perception);
+
+        let input_text = if let Some(line) = event
+            .payload
+            .get("line")
+            .and_then(|v: &serde_json::Value| v.as_str())
+        {
+            line.to_string()
+        } else if let Some(content) = event
+            .payload
+            .get("content")
+            .and_then(|v: &serde_json::Value| v.as_str())
+        {
+            content.to_string()
+        } else {
+            String::new()
+        };
+
+        // 2. Intent & State Layer (The "Soul Question")
+        let intent = match self
+            .intent_module
+            .evaluate(&self.persona, &perception, &input_text)
+            .await
+        {
+            Ok(i) => i,
+            Err(e) => {
+                error!("Intent evaluation failed: {}", e);
+                return;
+            }
+        };
+
+        if intent == IntentDecision::Ignore {
+            info!("IntentDecision: IGNORE. Skipping response.");
+            return;
+        }
+
+        info!("IntentDecision: ACT. Proceeding to DecisionEngine.");
+
+        // 3. Decision Engine
         let plan_res = self.decision_engine.decide(&self.persona, &event).await;
         match plan_res {
             Ok(plan) => {
                 info!("Plan decided for session {}: {:?}", self.id, plan);
-
-                let input_text = if let Some(line) = event
-                    .payload
-                    .get("line")
-                    .and_then(|v: &serde_json::Value| v.as_str())
-                {
-                    line.to_string()
-                } else if let Some(content) = event
-                    .payload
-                    .get("content")
-                    .and_then(|v: &serde_json::Value| v.as_str())
-                {
-                    content.to_string()
-                } else {
-                    String::new()
-                };
 
                 // Routing logic
                 let target_ids = {
@@ -178,6 +213,8 @@ pub struct SessionManager {
     // Dependencies for spawning sessions
     decision_engine: Arc<Box<dyn DecisionEngine + Send + Sync>>,
     workflow_engine: Arc<WorkflowEngine>,
+    perception_module: Arc<Box<dyn PerceptionModule + Send + Sync>>,
+    intent_module: Arc<Box<dyn IntentModule + Send + Sync>>,
     persona: Arc<Persona>,
     output_handlers: Arc<RwLock<HashMap<HandlerId, Box<dyn OutputHandler + Send + Sync>>>>,
     router: Arc<StdRwLock<EventRouter>>,
@@ -188,6 +225,8 @@ impl SessionManager {
         factory: Arc<super::McpClientFactory>,
         decision_engine: Arc<Box<dyn DecisionEngine + Send + Sync>>,
         workflow_engine: Arc<WorkflowEngine>,
+        perception_module: Arc<Box<dyn PerceptionModule + Send + Sync>>,
+        intent_module: Arc<Box<dyn IntentModule + Send + Sync>>,
         persona: Arc<Persona>,
         output_handlers: Arc<RwLock<HashMap<HandlerId, Box<dyn OutputHandler + Send + Sync>>>>,
         router: Arc<StdRwLock<EventRouter>>,
@@ -197,6 +236,8 @@ impl SessionManager {
             factory,
             decision_engine,
             workflow_engine,
+            perception_module,
+            intent_module,
             persona,
             output_handlers,
             router,
@@ -240,6 +281,8 @@ impl SessionManager {
                     mcp_client,
                     decision_engine: self.decision_engine.clone(),
                     workflow_engine: self.workflow_engine.clone(),
+                    perception_module: self.perception_module.clone(),
+                    intent_module: self.intent_module.clone(),
                     persona: self.persona.clone(),
                     output_handlers: self.output_handlers.clone(),
                     router: self.router.clone(),

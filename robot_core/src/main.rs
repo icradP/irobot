@@ -2,8 +2,9 @@
 extern crate robot_core;
 
 use robot_core::core::{
-    RobotCore, decision_engine::LLMDecisionEngine, persona::Persona,
-    workflow_engine::WorkflowEngine,
+    decision_engine::LLMDecisionEngine, intent::LLMIntentModule,
+    perception::BasicPerceptionModule, persona::Persona, workflow_engine::WorkflowEngine,
+    RobotCore,
 };
 use robot_core::llm::lmstudio::LMStudioClient;
 use robot_core::mcp::rmcp_client::RmcpStdIoClient;
@@ -37,10 +38,17 @@ async fn main() -> anyhow::Result<()> {
         .await?,
     );
     let decision = Box::new(LLMDecisionEngine::new(
-        Box::new(llm_for_decision),
+        Box::new(llm_for_decision.clone()),
         model.clone(),
         mcp_client.clone(),
     ));
+
+    let perception = Box::new(BasicPerceptionModule);
+    let intent = Box::new(LLMIntentModule::new(
+        Box::new(llm_for_decision),
+        model.clone(),
+    ));
+
     let param_resolver = Arc::new(LlmParameterResolver {
         llm: Arc::new(LMStudioClient::new(url.clone(), api_key.clone())),
         model: std::env::var("LMSTUDIO_MODEL").unwrap_or_else(|_| "default".to_string()),
@@ -68,7 +76,14 @@ async fn main() -> anyhow::Result<()> {
             })
         });
 
-    let mut core = RobotCore::new(persona, decision, workflow, mcp_client_factory);
+    let mut core = RobotCore::new(
+        persona,
+        decision,
+        workflow,
+        perception,
+        intent,
+        mcp_client_factory,
+    );
 
     register_handlers!(core => {
         WebHandler: (

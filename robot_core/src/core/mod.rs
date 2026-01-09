@@ -1,6 +1,8 @@
 pub mod decision_engine;
 pub mod input_handler;
+pub mod intent;
 pub mod output_handler;
+pub mod perception;
 pub mod persona;
 pub mod router;
 pub mod session;
@@ -9,14 +11,16 @@ pub mod workflow_engine;
 
 use crate::core::decision_engine::DecisionEngine;
 use crate::core::input_handler::InputHandler;
+use crate::core::intent::IntentModule;
 use crate::core::output_handler::OutputHandler;
+use crate::core::perception::PerceptionModule;
 use crate::core::persona::Persona;
 use crate::core::router::{EventRouter, HandlerId};
 use crate::core::session::SessionManager;
 use crate::core::workflow_engine::WorkflowEngine;
 use crate::mcp::client::MCPClient;
 use crate::utils::InputEvent;
-use futures::future::{BoxFuture, join_all};
+use futures::future::{join_all, BoxFuture};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::info;
@@ -34,6 +38,8 @@ pub struct RobotCore {
     pub persona: Arc<Persona>,
     pub decision_engine: Arc<Box<dyn DecisionEngine + Send + Sync>>,
     pub workflow_engine: Arc<WorkflowEngine>,
+    pub perception_module: Arc<Box<dyn PerceptionModule + Send + Sync>>,
+    pub intent_module: Arc<Box<dyn IntentModule + Send + Sync>>,
     pub output_handlers: Arc<RwLock<HashMap<HandlerId, Box<dyn OutputHandler + Send + Sync>>>>,
     // mcp_clients is replaced by session_manager
     pub session_manager: Arc<SessionManager>,
@@ -48,6 +54,8 @@ impl RobotCore {
         persona: Persona,
         decision_engine: Box<dyn DecisionEngine + Send + Sync>,
         workflow_engine: WorkflowEngine,
+        perception_module: Box<dyn PerceptionModule + Send + Sync>,
+        intent_module: Box<dyn IntentModule + Send + Sync>,
         mcp_client_factory: McpClientFactory,
     ) -> Self {
         let (input_sender, input_receiver) = mpsc::unbounded_channel();
@@ -57,6 +65,8 @@ impl RobotCore {
         let persona_arc = Arc::new(persona);
         let decision_engine_arc = Arc::new(decision_engine);
         let workflow_engine_arc = Arc::new(workflow_engine);
+        let perception_module_arc = Arc::new(perception_module);
+        let intent_module_arc = Arc::new(intent_module);
         let mcp_client_factory_arc = Arc::new(mcp_client_factory);
         let router_arc = Arc::new(StdRwLock::new(EventRouter::new()));
 
@@ -64,6 +74,8 @@ impl RobotCore {
             mcp_client_factory_arc.clone(),
             decision_engine_arc.clone(),
             workflow_engine_arc.clone(),
+            perception_module_arc.clone(),
+            intent_module_arc.clone(),
             persona_arc.clone(),
             output_handlers.clone(),
             router_arc.clone(),
@@ -96,6 +108,8 @@ impl RobotCore {
             persona: persona_arc,
             decision_engine: decision_engine_arc,
             workflow_engine: workflow_engine_arc,
+            perception_module: perception_module_arc,
+            intent_module: intent_module_arc,
             output_handlers,
             session_manager,
             mcp_client_factory: mcp_client_factory_arc,
