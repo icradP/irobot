@@ -11,8 +11,9 @@ use rmcp::{
         CallToolRequest, CallToolRequestParam, CancelledNotificationParam, ClientCapabilities,
         ClientInfo, ClientRequest, CreateElicitationRequestParam, CreateElicitationResult,
         ElicitationAction, Implementation, ListRootsResult, RequestId, Root, ServerResult,
+        ProgressNotificationParam,
     },
-    service::{PeerRequestOptions, RequestContext, RoleClient, RunningService, ServiceError},
+    service::{NotificationContext, PeerRequestOptions, RequestContext, RoleClient, RunningService, ServiceError},
 };
 use std::sync::{Arc, Mutex};
 
@@ -67,6 +68,31 @@ fn is_cancel_text(s: &str) -> bool {
 impl rmcp::handler::client::ClientHandler for RobotClientHandler {
     fn get_info(&self) -> ClientInfo {
         self.info.clone()
+    }
+
+    fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        async move {
+            let output_event = OutputEvent {
+                target: "default".into(),
+                source: "mcp".into(),
+                session_id: Some(self.session_id.clone()),
+                content: serde_json::json!({
+                    "type": "progress",
+                    "token": params.progress_token,
+                    "progress": params.progress,
+                    "total": params.total,
+                    "message": params.message
+                }),
+                style: OutputStyle::Neutral,
+            };
+            if let Err(e) = output_bus().send(output_event) {
+                eprintln!("[mcp_client] Failed to send progress output event: {}", e);
+            }
+        }
     }
 
     fn create_elicitation(
@@ -416,27 +442,39 @@ impl MCPClient for RmcpStdIoClient {
             args
         );
 
-        // Check if arguments contain missing values - if so, don't pass them to trigger elicitation
-        let should_elicit = if let serde_json::Value::Object(ref obj) = args {
-            obj.values().any(|v| match v {
-                serde_json::Value::Null => true,
-                serde_json::Value::String(s) => {
-                    let t = s.trim();
-                    t.is_empty() || t.eq_ignore_ascii_case("null")
+        // Only elicit when REQUIRED fields are missing/empty
+        let required = self.required_fields(tool).await.unwrap_or_default();
+        let mut missing_fields: Vec<String> = Vec::new();
+        if let serde_json::Value::Object(ref obj) = args {
+            for f in &required {
+                match obj.get(f) {
+                    None => missing_fields.push(f.clone()),
+                    Some(v) => {
+                        let is_missing = match v {
+                            serde_json::Value::Null => true,
+                            serde_json::Value::String(s) => {
+                                let t = s.trim();
+                                t.is_empty() || t.eq_ignore_ascii_case("null")
+                            }
+                            serde_json::Value::Array(a) => a.is_empty(),
+                            _ => false,
+                        };
+                        if is_missing {
+                            missing_fields.push(f.clone());
+                        }
+                    }
                 }
-                _ => false,
-            })
-        } else {
-            false
-        };
+            }
+        }
+        let should_elicit = !missing_fields.is_empty();
 
         // Note: We no longer need to capture session_id from args because this client
         // is already dedicated to a specific session_id.
 
         let arguments = if should_elicit {
             tracing::info!(
-                "RmcpStdIoClient: arguments contain null values for tool '{}', passing None to trigger elicitation",
-                tool
+                "RmcpStdIoClient: required fields missing for tool '{}': {:?}. Passing None to trigger elicitation",
+                tool, missing_fields
             );
             if let serde_json::Value::Object(obj) = &args {
                 let mut meta = serde_json::Map::new();

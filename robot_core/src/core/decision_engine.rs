@@ -51,11 +51,16 @@ impl LLMDecisionEngine {
 impl DecisionEngine for LLMDecisionEngine {
     async fn decide(&self, _persona: &Persona, input: &InputEvent) -> anyhow::Result<WorkflowPlan> {
         let tools: Vec<ToolMeta> = self.mcp.list_tools().await.unwrap_or_default();
+        
+        if tools.is_empty() {
+            return Err(anyhow::anyhow!("NO_TOOLS_AVAILABLE"));
+        }
+
         // 结构化打印工具列表
         let tool_list: Vec<String> = tools.iter().enumerate()
             .map(|(idx, tool)| format!("[{}] name={} description={}", idx, tool.name, tool.description))
             .collect();
-        info!("DecisionEngine detected MCP tools: [{}]", tool_list.join(", "));
+        info!("DecisionEngine detected MCP tools:\n [{}]", tool_list.join("\n"));
         let tool_descriptions: Vec<String> = tools
             .iter()
             .map(|t| format!("{}: {}", t.name, t.description))

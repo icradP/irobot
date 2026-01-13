@@ -24,6 +24,7 @@ pub mod echo;
 pub mod ffprobe;
 pub mod get_current_datetime;
 pub mod get_weather;
+pub mod long_tern_test;
 pub mod profile;
 pub mod sum;
 
@@ -53,6 +54,7 @@ pub fn all_entries() -> Vec<ToolEntry> {
         get_weather::tool(),
         get_current_datetime::tool(),
         ffprobe::tool(),
+        long_tern_test::tool(),
     ]
 }
 

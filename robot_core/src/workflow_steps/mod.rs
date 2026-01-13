@@ -113,6 +113,10 @@ impl ParameterResolver for LlmParameterResolver {
                 tool, description, schema_json, required_fields
             )
         };
+
+        //打印tool和所需schema参数
+        info!("LlmParameterResolver tool: {} \nSchema: {}", tool, schema_json);
+        
         let prev = ctx
             .memory
             .get("last_tool_result")

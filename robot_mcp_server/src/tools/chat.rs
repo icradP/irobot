@@ -1,4 +1,5 @@
 use crate::tools::{ToolEntry, to_object};
+use tracing::info;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -31,12 +32,10 @@ pub struct ChatRequest {
 impl rmcp::service::ElicitationSafe for ChatRequest {}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ChatElicitation {
-    pub model: Option<String>,
-    pub messages: Option<Vec<ChatMessage>>,
-    pub temperature: Option<f32>,
+pub struct ChatMessagesElicitation {
+    pub messages: Option<String>,
 }
-impl rmcp::service::ElicitationSafe for ChatElicitation {}
+impl rmcp::service::ElicitationSafe for ChatMessagesElicitation {}
 
 pub fn tool() -> ToolEntry {
     let schema = schemars::schema_for!(ChatRequest);
@@ -71,7 +70,8 @@ pub async fn handle(
         {
             max_attempts = (m.clamp(1, 20)) as usize;
         }
-        
+        //打印请求内容
+        info!("chat request: {}", args);
         // Try strict parsing first, then loose
         if let Ok(parsed) = serde_json::from_value::<ChatRequest>(args.clone()) {
             model = parsed.model;
@@ -110,19 +110,27 @@ pub async fn handle(
                     "tool_cancel\nname=chat\nmessage=用户取消了聊天请求",
                 )]));
             }
-            r = context.peer.elicit::<ChatElicitation>(prompt.clone()) => r,
+            r = context.peer.elicit::<ChatMessagesElicitation>(prompt.clone()) => r,
         };
 
         match elicit_result {
             Ok(Some(params)) => {
-                if params.model.is_some() { model = params.model; }
-                if let Some(msgs) = params.messages {
-                    if !msgs.is_empty() {
-                         messages = Some(msgs);
+                if let Some(ms_str) = params.messages {
+                    // 优先按 JSON 数组解析
+                    if let Ok(ms) = serde_json::from_str::<Vec<ChatMessage>>(&ms_str) {
+                        if !ms.is_empty() {
+                            messages = Some(ms);
+                        }
+                    } else if let Ok(single) = serde_json::from_str::<ChatMessage>(&ms_str) {
+                        messages = Some(vec![single]);
+                    } else if !ms_str.trim().is_empty() {
+                        messages = Some(vec![ChatMessage {
+                            role: "user".to_string(),
+                            content: ms_str,
+                        }]);
                     }
                 }
-                if params.temperature.is_some() { temperature = params.temperature; }
-                
+
                 if messages.is_none() {
                     prompt = "仍缺少必要参数(messages)，请补充：".to_string();
                 }

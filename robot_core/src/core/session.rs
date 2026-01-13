@@ -7,7 +7,7 @@ use crate::core::router::{EventRouter, HandlerId};
 use crate::core::sessions::web_session::WebSession;
 use crate::core::workflow_engine::WorkflowEngine;
 use crate::mcp::client::MCPClient;
-use crate::utils::InputEvent;
+use crate::utils::{InputEvent, OutputEvent};
 use async_trait::async_trait;
 use futures::future::join_all;
 use std::collections::HashMap;
@@ -120,27 +120,27 @@ impl RobotSession {
         info!("IntentDecision: ACT. Proceeding to DecisionEngine.");
 
         // 3. Decision Engine
+        // Routing logic
+        let target_ids = {
+            let route_ids_opt = {
+                let router = self.router.read().unwrap();
+                if router.has_routes() {
+                    Some(router.get_outputs_for_event(&event))
+                } else {
+                    None
+                }
+            };
+
+            match route_ids_opt {
+                Some(ids) if !ids.is_empty() => ids,
+                _ => self.output_handlers.read().await.keys().cloned().collect(),
+            }
+        };
+
         let plan_res = self.decision_engine.decide(&self.persona, &event).await;
         match plan_res {
             Ok(plan) => {
                 info!("Plan decided for session {}: {:?}", self.id, plan);
-
-                // Routing logic
-                let target_ids = {
-                    let route_ids_opt = {
-                        let router = self.router.read().unwrap();
-                        if router.has_routes() {
-                            Some(router.get_outputs_for_event(&event))
-                        } else {
-                            None
-                        }
-                    };
-
-                    match route_ids_opt {
-                        Some(ids) if !ids.is_empty() => ids,
-                        _ => self.output_handlers.read().await.keys().cloned().collect(),
-                    }
-                };
 
                 let mut ctx = crate::utils::Context::new(
                     (*self.persona).clone(),
@@ -170,10 +170,6 @@ impl RobotSession {
                                 );
 
                                 // Dispatch output
-                                // Note: We acquire read lock briefly to get handlers, then emit
-                                // Ideally we should clone handlers if possible to avoid holding lock during emit
-                                // But OutputHandler is a Trait Object in a Box, so cloning is hard unless we use Arc<Box<dyn...>>
-                                // For now, we follow existing pattern but we should optimize locking strategy later
                                 let handlers_guard = self.output_handlers.read().await;
                                 let futures = target_ids
                                     .iter()
@@ -200,6 +196,26 @@ impl RobotSession {
                 }
             }
             Err(e) => {
+                if e.to_string().contains("NO_TOOLS_AVAILABLE") {
+                    info!("No tools available, sending notification.");
+                    let output = OutputEvent {
+                        target: "default".to_string(),
+                        source: event.source.clone(),
+                        session_id: Some(self.id.clone()),
+                        content: serde_json::json!({
+                            "content": "没有可用执行能力"
+                        }),
+                        style: self.persona.style.clone(),
+                    };
+
+                    let handlers_guard = self.output_handlers.read().await;
+                    let futures = target_ids
+                        .iter()
+                        .filter_map(|handler_id| handlers_guard.get(handler_id))
+                        .map(|handler| handler.emit(output.clone()))
+                        .collect::<Vec<_>>();
+                    join_all(futures).await;
+                }
                 error!("Error deciding plan: {}", e);
             }
         }
