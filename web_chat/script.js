@@ -11,6 +11,7 @@ class ChatClient {
         this.isBroadcastMode = false;
         this.sessions = [];
         this.sessionMessages = {};
+        this.activeProgressBars = {};
 
         this.initializeElements();
         this.bindEvents();
@@ -314,6 +315,7 @@ class ChatClient {
         this.renderHistoryList();
 
         // Clear and restore
+        this.activeProgressBars = {};
         this.chatMessages.innerHTML = '';
         const messages = this.sessionMessages[id] || [];
         messages.forEach(msg => {
@@ -559,7 +561,94 @@ class ChatClient {
             }
         } else {
             // System/Bot message
-            this.displayBotMessage(message);
+            if (message.content && message.content.type === 'progress') {
+                this.updateProgress(message.content);
+            } else {
+                this.displayBotMessage(message);
+            }
+        }
+    }
+
+    updateProgress(data) {
+        console.log('updateProgress called with:', data);
+        // data: { message, progress, total, token, type: 'progress' }
+        const { token, progress, total, message } = data;
+        
+        const p = parseFloat(progress);
+        const t = parseFloat(total);
+        
+        let percent = (t > 0) ? (p / t) * 100 : 0;
+        if (percent > 100) percent = 100;
+        if (percent < 0) percent = 0;
+
+        // Ensure token is handled consistently as a string key
+        const tokenKey = (token !== undefined && token !== null) ? String(token) : 'default';
+
+        let progressEl = this.activeProgressBars[tokenKey];
+
+        if (!progressEl) {
+            console.log('Creating new progress bar for token:', tokenKey);
+            // Create new progress message
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'message bot-message progress-msg-container';
+            
+            const innerDiv = document.createElement('div');
+            innerDiv.className = 'message-inner';
+
+            // Avatar (Bot)
+            const avatarDiv = document.createElement('div');
+            avatarDiv.className = 'message-avatar';
+            avatarDiv.innerHTML = `<svg stroke="currentColor" fill="none" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" height="1.5em" width="1.5em" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>`;
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content progress-message';
+            
+            // Initialize with 0 value
+            contentDiv.innerHTML = `
+                <div class="progress-info">${message || 'Processing...'}</div>
+                <div class="progress-wrapper" style="position: relative; width: 100%;">
+                    <progress class="mcp-progress" value="0" max="100"></progress>
+                    <div class="progress-text">${Math.round(percent)}%</div>
+                </div>
+            `;
+
+            innerDiv.appendChild(avatarDiv);
+            innerDiv.appendChild(contentDiv);
+            msgDiv.appendChild(innerDiv);
+            
+            this.chatMessages.appendChild(msgDiv);
+            this.scrollToBottom();
+
+            progressEl = {
+                container: msgDiv,
+                bar: contentDiv.querySelector('progress.mcp-progress'),
+                text: contentDiv.querySelector('.progress-text'),
+                info: contentDiv.querySelector('.progress-info')
+            };
+            this.activeProgressBars[tokenKey] = progressEl;
+
+            // Trigger animation after a slight delay
+            setTimeout(() => {
+                if (progressEl && progressEl.bar) {
+                    progressEl.bar.value = percent;
+                    console.log('Initial value set to:', percent);
+                }
+            }, 50);
+
+        } else {
+            console.log('Updating existing progress bar for token:', tokenKey, 'to', percent + '%');
+            // Update existing
+            progressEl.bar.value = percent;
+            progressEl.text.textContent = `${Math.round(percent)}%`;
+            if (message) progressEl.info.textContent = message;
+        }
+
+        if (p >= t) {
+            console.log('Progress complete for token:', tokenKey);
+            // Optional: Mark as complete or remove from active map after some time
+             setTimeout(() => {
+                delete this.activeProgressBars[tokenKey];
+             }, 1000);
         }
     }
 
@@ -757,6 +846,7 @@ class ChatClient {
     }
     
     clearChat() {
+        this.activeProgressBars = {};
         this.chatMessages.innerHTML = `
             <div class="message system-message">
                 <div class="message-inner">
