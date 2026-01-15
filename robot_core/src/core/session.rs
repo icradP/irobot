@@ -9,7 +9,7 @@ use crate::core::tasks::client::TaskAwareMcpClient;
 use crate::core::tasks::manager::TaskManager;
 use crate::core::workflow_engine::WorkflowEngine;
 use crate::mcp::client::MCPClient;
-use crate::utils::{InputEvent, OutputEvent};
+use crate::utils::{InputEvent, OutputEvent, StepSpec, Context};
 use async_trait::async_trait;
 use futures::future::join_all;
 use std::collections::HashMap;
@@ -17,6 +17,7 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use crate::workflow_steps::StepStatus;
 
 pub enum SessionMessage {
     Input(InputEvent),
@@ -40,6 +41,8 @@ pub struct RobotSession {
     pub output_handlers: Arc<RwLock<HashMap<HandlerId, Box<dyn OutputHandler + Send + Sync>>>>,
     pub router: Arc<StdRwLock<EventRouter>>,
     pub task_manager: Arc<TaskManager>,
+    // State for pending execution (WaitUser)
+    pub pending_execution: Option<(Vec<StepSpec>, usize, Context)>,
 }
 
 #[async_trait]
@@ -77,6 +80,7 @@ impl RobotSession {
             output_handlers,
             router,
             task_manager,
+            pending_execution: None,
         }
     }
 
@@ -106,16 +110,35 @@ impl RobotSession {
             );
             return;
         }
+        
+        let sid_key = event
+            .session_id
+            .clone()
+            .unwrap_or_else(|| event.source.clone());
+        if crate::utils::is_elicitation_active(&sid_key) {
+            info!(
+                "Session {} skipping event {} because MCP elicitation is active",
+                self.id, event.id
+            );
+            return;
+        }
+        
+        // 0. Routing logic (pre-calculation for later use)
+        let target_ids = {
+            let route_ids_opt = {
+                let router = self.router.read().unwrap();
+                if router.has_routes() {
+                    Some(router.get_outputs_for_event(&event))
+                } else {
+                    None
+                }
+            };
 
-        // 1. Perception Layer
-        let perception = match self.perception_module.perceive(&event).await {
-            Ok(p) => p,
-            Err(e) => {
-                error!("Perception failed: {}", e);
-                return;
+            match route_ids_opt {
+                Some(ids) if !ids.is_empty() => ids,
+                _ => self.output_handlers.read().await.keys().cloned().collect(),
             }
         };
-        info!("Perception Result: {:?}", perception);
 
         let input_text = if let Some(line) = event
             .payload
@@ -132,6 +155,26 @@ impl RobotSession {
         } else {
             String::new()
         };
+
+        // Check for pending execution (Elicitation / Continuation)
+        if let Some((steps, idx, mut ctx)) = self.pending_execution.take() {
+            info!("Resuming pending execution at step {}", idx);
+            // Update context with new input
+            ctx.input_text = input_text;
+            // Resume workflow
+            self.execute_workflow(steps, idx, ctx, target_ids, event.source).await;
+            return;
+        }
+
+        // 1. Perception Layer
+        let perception = match self.perception_module.perceive(&event).await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Perception failed: {}", e);
+                return;
+            }
+        };
+        info!("Perception Result: {:?}", perception);
 
         // 2. Intent & State Layer (The "Soul Question")
         let intent = match self
@@ -154,172 +197,18 @@ impl RobotSession {
         info!("IntentDecision: ACT. Proceeding to DecisionEngine.");
 
         // 3. Decision Engine
-        // Routing logic
-        let target_ids = {
-            let route_ids_opt = {
-                let router = self.router.read().unwrap();
-                if router.has_routes() {
-                    Some(router.get_outputs_for_event(&event))
-                } else {
-                    None
-                }
-            };
-
-            match route_ids_opt {
-                Some(ids) if !ids.is_empty() => ids,
-                _ => self.output_handlers.read().await.keys().cloned().collect(),
-            }
-        };
-
         let plan_res = self.decision_engine.decide(&self.persona, &event, &*self.mcp_client).await;
         match plan_res {
             Ok(plan) => {
                 info!("Plan decided for session {}: {:?}", self.id, plan);
 
-                let mut ctx = crate::utils::Context::new(
+                let ctx = crate::utils::Context::new(
                     (*self.persona).clone(),
                     input_text.clone(),
                     Some(self.id.clone()),
                 );
-
-                for spec in plan.steps {
-                    info!("workflow step start: {:?}", spec);
-
-                    let (is_bg, task_name, task_args) = match &spec {
-                        crate::utils::StepSpec::Tool { name, args, is_background } => {
-                            (*is_background, name.clone(), Some(args.clone()))
-                        }
-                        _ => (false, "background_task".to_string(), None),
-                    };
-
-                    if is_bg {
-                        info!("Spawning background task for step: {:?}", spec);
-                        let step = crate::workflow_steps::build_step(
-                            &spec,
-                            self.workflow_engine.resolver.clone(),
-                        );
-                        
-                        // Clone dependencies for background task
-                        let mut ctx_clone = ctx.clone();
-                        let mcp_client = self.mcp_client.clone();
-                        let output_handlers = self.output_handlers.clone();
-                        let target_ids_clone = target_ids.clone();
-                        let session_id = self.id.clone();
-                        let event_source = event.source.clone();
-                        let task_manager = self.task_manager.clone();
-                        
-                        let task_id = Uuid::new_v4().to_string();
-                        let task_id_clone = task_id.clone();
-                        let original_prompt = match &task_args {
-                            Some(args) => {
-                                let args_str = args.to_string();
-                                if args_str == "null" || args_str == "{}" || args_str == "[]" {
-                                    input_text.clone()
-                                } else {
-                                    format!("{} | args={}", input_text, args_str)
-                                }
-                            }
-                            None => input_text.clone(),
-                        };
-
-                        let handle = tokio::spawn(async move {
-                            let res = step.run(&mut ctx_clone, &*mcp_client).await;
-                             match res {
-                                Ok(res) => {
-                                    if let Some(mut o) = res.output {
-                                        o.source = event_source;
-                                        if o.session_id.is_none() {
-                                            o.session_id = Some(session_id);
-                                        }
-
-                                        // Dispatch output
-                                        let handlers_guard = output_handlers.read().await;
-                                        let futures = target_ids_clone
-                                            .iter()
-                                            .filter_map(|handler_id| handlers_guard.get(handler_id))
-                                            .map(|handler| handler.emit(o.clone()))
-                                            .collect::<Vec<_>>();
-                                        futures::future::join_all(futures).await;
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Error executing background workflow step: {}", e);
-                                }
-                            }
-                            // Remove task from manager upon completion
-                            task_manager.remove_task(&task_id_clone).await;
-                        });
-                        
-                        self
-                            .task_manager
-                            .add_task(task_id.clone(), task_name.clone(), original_prompt, handle)
-                            .await;
-                        
-                        // Notify user that background task started
-                        let output = OutputEvent {
-                            target: "default".into(),
-                            source: event.source.clone(),
-                            session_id: Some(self.id.clone()),
-                            content: serde_json::json!({
-                                "type": "text",
-                                "text": format!("Started background task '{}' (ID: {})", task_name, task_id)
-                            }),
-                            style: OutputStyle::Neutral,
-                        };
-                        let handlers_guard = self.output_handlers.read().await;
-                        for handler_id in &target_ids {
-                            if let Some(handler) = handlers_guard.get(handler_id) {
-                                let _ = handler.emit(output.clone()).await;
-                            }
-                        }
-                        
-                        continue;
-                    }
-
-                    let step = crate::workflow_steps::build_step(
-                        &spec,
-                        self.workflow_engine.resolver.clone(),
-                    );
-                    let res = step.run(&mut ctx, &*self.mcp_client).await;
-
-                    match res {
-                        Ok(res) => {
-                            if let Some(mut o) = res.output {
-                                o.source = event.source.clone();
-                                if o.session_id.is_none() {
-                                    o.session_id = Some(self.id.clone());
-                                }
-
-                                info!(
-                                    "workflow step produced output, dispatching to {} handlers",
-                                    target_ids.len()
-                                );
-
-                                // Dispatch output
-                                let handlers_guard = self.output_handlers.read().await;
-                                let futures = target_ids
-                                    .iter()
-                                    .filter_map(|handler_id| handlers_guard.get(handler_id))
-                                    .map(|handler| handler.emit(o.clone()))
-                                    .collect::<Vec<_>>();
-                                let results = join_all(futures).await;
-                                for res in results {
-                                    if let Err(e) = res {
-                                        error!("Error emitting workflow output: {}", e);
-                                    }
-                                }
-                            }
-                            if !res.next {
-                                info!("workflow step requests stop");
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            error!("Error executing workflow step: {}", e);
-                            break;
-                        }
-                    }
-                }
+                
+                self.execute_workflow(plan.steps, 0, ctx, target_ids, event.source).await;
             }
             Err(e) => {
                 if e.to_string().contains("NO_TOOLS_AVAILABLE") {
@@ -343,6 +232,190 @@ impl RobotSession {
                     join_all(futures).await;
                 }
                 error!("Error deciding plan: {}", e);
+            }
+        }
+    }
+    
+    async fn execute_workflow(
+        &mut self, 
+        steps: Vec<StepSpec>, 
+        start_idx: usize, 
+        mut ctx: Context,
+        target_ids: Vec<HandlerId>,
+        event_source: String,
+    ) {
+        for (i, spec) in steps.iter().enumerate().skip(start_idx) {
+            info!("workflow step start: {:?}", spec);
+
+            let (is_bg, task_name, task_args) = match &spec {
+                crate::utils::StepSpec::Tool { name, args, is_background } => {
+                    (*is_background, name.clone(), Some(args.clone()))
+                }
+                _ => (false, "background_task".to_string(), None),
+            };
+
+            if is_bg {
+                info!("Spawning background task for step: {:?}", spec);
+                let step = crate::workflow_steps::build_step(
+                    &spec,
+                    self.workflow_engine.resolver.clone(),
+                );
+                
+                // Clone dependencies for background task
+                let mut ctx_clone = ctx.clone();
+                let mcp_client = self.mcp_client.clone();
+                let output_handlers = self.output_handlers.clone();
+                let target_ids_clone = target_ids.clone();
+                let session_id = self.id.clone();
+                let event_source = event_source.clone();
+                let event_source_task = event_source.clone();
+                let task_manager = self.task_manager.clone();
+                
+                let task_id = Uuid::new_v4().to_string();
+                let task_id_clone = task_id.clone();
+                let original_prompt = match &task_args {
+                    Some(args) => {
+                        let args_str = args.to_string();
+                        if args_str == "null" || args_str == "{}" || args_str == "[]" {
+                            ctx.input_text.clone()
+                        } else {
+                            format!("{} | args={}", ctx.input_text, args_str)
+                        }
+                    }
+                    None => ctx.input_text.clone(),
+                };
+
+                let handle = tokio::spawn(async move {
+                    let res = step.run(&mut ctx_clone, &*mcp_client).await;
+                     match res {
+                        Ok(res) => {
+                            if let Some(mut o) = res.output {
+                                o.source = event_source_task;
+                                if o.session_id.is_none() {
+                                    o.session_id = Some(session_id);
+                                }
+
+                                // Dispatch output
+                                let handlers_guard = output_handlers.read().await;
+                                let futures = target_ids_clone
+                                    .iter()
+                                    .filter_map(|handler_id| handlers_guard.get(handler_id))
+                                    .map(|handler| handler.emit(o.clone()))
+                                    .collect::<Vec<_>>();
+                                futures::future::join_all(futures).await;
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error executing background workflow step: {}", e);
+                        }
+                    }
+                    // Remove task from manager upon completion
+                    task_manager.remove_task(&task_id_clone).await;
+                });
+                
+                self
+                    .task_manager
+                    .add_task(task_id.clone(), task_name.clone(), original_prompt, handle)
+                    .await;
+                
+                // Notify user that background task started
+                let output = OutputEvent {
+                    target: "default".into(),
+                    source: event_source.clone(),
+                    session_id: Some(self.id.clone()),
+                    content: serde_json::json!({
+                        "type": "text",
+                        "text": format!("Started background task '{}' (ID: {})", task_name, task_id)
+                    }),
+                    style: OutputStyle::Neutral,
+                };
+                let handlers_guard = self.output_handlers.read().await;
+                for handler_id in &target_ids {
+                    if let Some(handler) = handlers_guard.get(handler_id) {
+                        let _ = handler.emit(output.clone()).await;
+                    }
+                }
+                
+                continue;
+            }
+
+            let step = crate::workflow_steps::build_step(
+                &spec,
+                self.workflow_engine.resolver.clone(),
+            );
+            let res = step.run(&mut ctx, &*self.mcp_client).await;
+
+            match res {
+                Ok(res) => {
+                    // Handle output
+                    if let Some(mut o) = res.output {
+                        o.source = event_source.clone();
+                        if o.session_id.is_none() {
+                            o.session_id = Some(self.id.clone());
+                        }
+
+                        info!(
+                            "workflow step produced output, dispatching to {} handlers",
+                            target_ids.len()
+                        );
+
+                        // Dispatch output
+                        let handlers_guard = self.output_handlers.read().await;
+                        let futures = target_ids
+                            .iter()
+                            .filter_map(|handler_id| handlers_guard.get(handler_id))
+                            .map(|handler| handler.emit(o.clone()))
+                            .collect::<Vec<_>>();
+                        let results = join_all(futures).await;
+                        for res in results {
+                            if let Err(e) = res {
+                                error!("Error emitting workflow output: {}", e);
+                            }
+                        }
+                    }
+                    
+                    // Handle status
+                    match res.status {
+                        StepStatus::WaitUser(prompt) => {
+                            info!("Workflow step requests user input: {}", prompt);
+                            
+                            // Emit prompt to user
+                            let output = OutputEvent {
+                                target: "default".to_string(),
+                                source: event_source.clone(),
+                                session_id: Some(self.id.clone()),
+                                content: serde_json::json!({
+                                    "type": "text",
+                                    "text": prompt
+                                }),
+                                style: self.persona.style.clone(),
+                            };
+
+                            let handlers_guard = self.output_handlers.read().await;
+                            let futures = target_ids
+                                .iter()
+                                .filter_map(|handler_id| handlers_guard.get(handler_id))
+                                .map(|handler| handler.emit(output.clone()))
+                                .collect::<Vec<_>>();
+                            join_all(futures).await;
+                            
+                            // Suspend execution
+                            self.pending_execution = Some((steps, i, ctx));
+                            return;
+                        }
+                        StepStatus::Stop => {
+                            info!("workflow step requests stop");
+                            break;
+                        }
+                        StepStatus::Continue => {
+                            // Continue to next step
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Error executing workflow step: {}", e);
+                    break;
+                }
             }
         }
     }
@@ -435,6 +508,7 @@ impl SessionManager {
                     output_handlers: self.output_handlers.clone(),
                     router: self.router.clone(),
                     task_manager,
+                    pending_execution: None,
                 };
 
                 // Spawn session actor

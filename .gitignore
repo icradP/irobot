@@ -8,3 +8,4 @@ Cargo.lock
 **/uploads/
 **/gguf/
 .trae/
+cpp/

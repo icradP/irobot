@@ -22,6 +22,7 @@ pub struct AppState {
 pub mod chat;
 pub mod echo;
 pub mod ffprobe;
+pub mod pusher;
 pub mod get_current_datetime;
 pub mod get_weather;
 pub mod long_tern_test;
@@ -54,6 +55,7 @@ pub fn all_entries() -> Vec<ToolEntry> {
         get_weather::tool(),
         get_current_datetime::tool(),
         ffprobe::tool(),
+        pusher::tool(),
         long_tern_test::tool(),
     ]
 }

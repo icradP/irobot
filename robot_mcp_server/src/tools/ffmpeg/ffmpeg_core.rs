@@ -1,1 +1,1 @@
-//实现FFmpegCore trait
+//实现FFmpegCore trait 用于处理FFmpeg命令

@@ -2,7 +2,7 @@ use crate::core::output_handler::OutputHandler;
 use crate::core::persona::Persona;
 use crate::mcp::client::MCPClient;
 use crate::utils::WorkflowPlan;
-use crate::workflow_steps::{NoopResolver, ParameterResolver, StepResult, build_step};
+use crate::workflow_steps::{NoopResolver, ParameterResolver, StepResult, StepStatus, build_step};
 use std::sync::Arc;
 use tracing::info;
 
@@ -45,9 +45,27 @@ impl WorkflowEngine {
                     h.emit(o.clone()).await?;
                 }
             }
-            if !res.next {
-                info!("workflow step requests stop");
-                break;
+            match res.status {
+                StepStatus::Stop => {
+                    info!("workflow step requests stop");
+                    break;
+                }
+                StepStatus::WaitUser(prompt) => {
+                    info!("workflow step requests user input: {}", prompt);
+                    // Emit prompt
+                    let output = crate::utils::OutputEvent {
+                        target: "default".into(),
+                        source: input_source.clone(),
+                        session_id: None,
+                        content: serde_json::json!({"type": "text", "text": prompt}),
+                        style: persona.style.clone(),
+                    };
+                    for h in outputs {
+                         let _ = h.emit(output.clone()).await;
+                    }
+                    break;
+                }
+                StepStatus::Continue => {}
             }
             info!("workflow step done: {:?}", spec);
         }

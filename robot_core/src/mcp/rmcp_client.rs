@@ -102,13 +102,14 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
     ) -> impl std::future::Future<Output = Result<CreateElicitationResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
+            let sid = self.session_id.clone();
+            crate::utils::set_elicitation_active(&sid, true);
             let schema_str =
                 serde_json::to_string_pretty(&request.requested_schema).unwrap_or_default();
             eprintln!("Message: {}", request.message);
             eprintln!("Schema: {}", schema_str);
             eprintln!("Please provide input (Natural language or JSON): ");
 
-            // Record elicitation prompt and schema for potential introspection
             {
                 let mut guard = self.shared.lock().unwrap();
                 guard.last_elicitation_message = Some(request.message.clone());
@@ -117,8 +118,6 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                         .unwrap_or(serde_json::Value::Null),
                 );
             }
-
-            // Use the session_id bound to this client
             let sid = self.session_id.clone();
 
             // Emit output event to prompt the user
@@ -184,6 +183,7 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                         })
                         .await;
                 }
+                crate::utils::set_elicitation_active(&sid, false);
                 return Ok(CreateElicitationResult {
                     action: ElicitationAction::Cancel,
                     content: None,
@@ -253,12 +253,12 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
 
                             match serde_json::from_str(json_str) {
                                 Ok(v) => {
-                                    // Mark event as consumed so core doesn't process it again
                                     crate::utils::mark_event_consumed(input_event.id);
                                     v
                                 }
                                 Err(e) => {
                                     eprintln!("[elicit] ERROR: LLM produced invalid JSON: {}", e);
+                                    crate::utils::set_elicitation_active(&sid, false);
                                     return Err(rmcp::ErrorData::invalid_params(
                                         format!("Failed to parse LLM output as JSON: {}", e),
                                         None,
@@ -268,6 +268,7 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                         }
                         Err(e) => {
                             eprintln!("[elicit] ERROR: LLM call failed: {}", e);
+                            crate::utils::set_elicitation_active(&sid, false);
                             return Err(rmcp::ErrorData::internal_error(
                                 format!("LLM transformation failed: {}", e),
                                 None,
@@ -278,6 +279,7 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
             };
 
             eprintln!("[elicit] ✓ Parsed and returning to server\n");
+            crate::utils::set_elicitation_active(&sid, false);
             Ok(CreateElicitationResult {
                 action: ElicitationAction::Accept,
                 content: Some(parsed),

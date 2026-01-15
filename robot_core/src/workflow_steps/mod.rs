@@ -6,9 +6,16 @@ use serde_json::Value;
 use std::sync::Arc;
 use tracing::info;
 
+#[derive(Clone, Debug)]
+pub enum StepStatus {
+    Continue,
+    Stop,
+    WaitUser(String), // Prompt for user
+}
+
 #[derive(Clone)]
 pub struct StepResult {
-    pub next: bool,
+    pub status: StepStatus,
     pub output: Option<OutputEvent>,
 }
 
@@ -173,6 +180,18 @@ impl ParameterResolver for LlmParameterResolver {
 
         let mut v = v;
         normalize_null_strings(&mut v);
+
+        // Merge with original input if it was an object (preserve Planner's explicit values)
+        if let Some(original_obj) = input.as_object() {
+            if let Some(v_obj) = v.as_object_mut() {
+                for (k, val) in original_obj {
+                    if !val.is_null() {
+                        v_obj.insert(k.clone(), val.clone());
+                    }
+                }
+            }
+        }
+
         ensure_required_fields_present(&mut v, &required_fields);
         Ok(v)
     }
@@ -219,7 +238,7 @@ impl WorkflowStep for MemoryStep {
         info!("step memory run");
         ctx.memory = serde_json::json!({"input_text": ctx.input_text, "touched": true});
         Ok(StepResult {
-            next: true,
+            status: StepStatus::Continue,
             output: None,
         })
     }
@@ -231,7 +250,7 @@ impl WorkflowStep for ProfileStep {
         info!("step profile run");
         ctx.touch_profile();
         Ok(StepResult {
-            next: true,
+            status: StepStatus::Continue,
             output: None,
         })
     }
@@ -243,7 +262,7 @@ impl WorkflowStep for RelationshipStep {
         ctx.touch_relationships();
         let o = OutputEvent::from_context(ctx);
         Ok(StepResult {
-            next: false,
+            status: StepStatus::Stop,
             output: Some(o),
         })
     }
@@ -256,6 +275,7 @@ impl WorkflowStep for McpToolStep {
             .resolver
             .resolve(mcp, &self.name, &self.args, ctx)
             .await?;
+
         if let Some(session_id) = ctx.session_id.clone() {
             if let Some(obj) = resolved_args.as_object_mut() {
                 if !obj.contains_key("session_id") {
@@ -279,7 +299,7 @@ impl WorkflowStep for McpToolStep {
             style: crate::core::persona::OutputStyle::Neutral,
         };
         Ok(StepResult {
-            next: true,
+            status: StepStatus::Continue,
             output: Some(o),
         })
     }

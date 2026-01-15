@@ -69,10 +69,30 @@ impl MCPClient for TaskAwareMcpClient {
     }
 
     async fn required_fields(&self, tool: &str) -> anyhow::Result<Vec<String>> {
-        self.inner.required_fields(tool).await
+        match tool {
+            "cancel_task" => Ok(vec!["task_id".to_string()]),
+            "list_running_tasks" => Ok(vec![]),
+            _ => self.inner.required_fields(tool).await,
+        }
     }
 
     async fn tool_schema(&self, tool: &str) -> anyhow::Result<Option<Value>> {
-        self.inner.tool_schema(tool).await
+        match tool {
+            "cancel_task" => Ok(Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The ID of the task to cancel. Must be exactly as returned by list_running_tasks."
+                    }
+                },
+                "required": ["task_id"]
+            }))),
+            "list_running_tasks" => Ok(Some(serde_json::json!({
+                "type": "object",
+                "properties": {},
+            }))),
+            _ => self.inner.tool_schema(tool).await,
+        }
     }
 }

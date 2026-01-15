@@ -94,6 +94,7 @@ pub enum StepSpec {
 static EVENT_BUS_SENDER: OnceLock<broadcast::Sender<InputEvent>> = OnceLock::new();
 static OUTPUT_BUS_SENDER: OnceLock<broadcast::Sender<OutputEvent>> = OnceLock::new();
 static CONSUMED_EVENTS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
+static ACTIVE_ELICITATIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 pub fn event_bus() -> broadcast::Sender<InputEvent> {
     EVENT_BUS_SENDER
@@ -126,4 +127,24 @@ pub fn check_and_remove_consumed_event(id: &Uuid) -> bool {
         return guard.remove(id);
     }
     false
+}
+
+pub fn set_elicitation_active(session_id: &str, active: bool) {
+    let set = ACTIVE_ELICITATIONS.get_or_init(|| Mutex::new(HashSet::new()));
+    if let Ok(mut guard) = set.lock() {
+        if active {
+            guard.insert(session_id.to_string());
+        } else {
+            guard.remove(session_id);
+        }
+    }
+}
+
+pub fn is_elicitation_active(session_id: &str) -> bool {
+    let set = ACTIVE_ELICITATIONS.get_or_init(|| Mutex::new(HashSet::new()));
+    if let Ok(guard) = set.lock() {
+        guard.contains(session_id)
+    } else {
+        false
+    }
 }
