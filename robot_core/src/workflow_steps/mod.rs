@@ -293,7 +293,11 @@ pub fn build_step(
         StepSpec::Memory => Box::new(MemoryStep),
         StepSpec::Profile => Box::new(ProfileStep),
         StepSpec::Relationship => Box::new(RelationshipStep),
-        StepSpec::Tool { name, args } => Box::new(McpToolStep {
+        StepSpec::Tool {
+            name,
+            args,
+            is_background: _,
+        } => Box::new(McpToolStep {
             name: name.clone(),
             args: args.clone(),
             resolver,

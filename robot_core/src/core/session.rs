@@ -1,10 +1,12 @@
-use crate::core::decision_engine::DecisionEngine;
+use crate::core::decision_engine::{DecisionEngine, LLMDecisionEngine};
 use crate::core::intent::{IntentDecision, IntentModule};
 use crate::core::output_handler::OutputHandler;
 use crate::core::perception::PerceptionModule;
-use crate::core::persona::Persona;
+use crate::core::persona::{OutputStyle, Persona};
 use crate::core::router::{EventRouter, HandlerId};
 use crate::core::sessions::web_session::WebSession;
+use crate::core::tasks::client::TaskAwareMcpClient;
+use crate::core::tasks::manager::TaskManager;
 use crate::core::workflow_engine::WorkflowEngine;
 use crate::mcp::client::MCPClient;
 use crate::utils::{InputEvent, OutputEvent};
@@ -13,7 +15,8 @@ use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::{mpsc, RwLock};
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 pub enum SessionMessage {
     Input(InputEvent),
@@ -36,6 +39,7 @@ pub struct RobotSession {
     pub persona: Arc<Persona>,
     pub output_handlers: Arc<RwLock<HashMap<HandlerId, Box<dyn OutputHandler + Send + Sync>>>>,
     pub router: Arc<StdRwLock<EventRouter>>,
+    pub task_manager: Arc<TaskManager>,
 }
 
 #[async_trait]
@@ -46,6 +50,36 @@ impl SessionActor for RobotSession {
 }
 
 impl RobotSession {
+    pub fn new(
+        id: String,
+        mcp_client: Arc<dyn MCPClient + Send + Sync>,
+        decision_engine: Arc<Box<dyn DecisionEngine + Send + Sync>>,
+        workflow_engine: Arc<WorkflowEngine>,
+        perception_module: Arc<Box<dyn PerceptionModule + Send + Sync>>,
+        intent_module: Arc<Box<dyn IntentModule + Send + Sync>>,
+        persona: Arc<Persona>,
+        output_handlers: Arc<RwLock<HashMap<HandlerId, Box<dyn OutputHandler + Send + Sync>>>>,
+        router: Arc<StdRwLock<EventRouter>>,
+        inbox: mpsc::UnboundedReceiver<SessionMessage>,
+    ) -> Self {
+        let task_manager = Arc::new(TaskManager::new());
+        let aware_client = Arc::new(TaskAwareMcpClient::new(mcp_client, task_manager.clone()));
+
+        Self {
+            id,
+            inbox,
+            mcp_client: aware_client,
+            decision_engine,
+            workflow_engine,
+            perception_module,
+            intent_module,
+            persona,
+            output_handlers,
+            router,
+            task_manager,
+        }
+    }
+
     pub async fn run_inner(mut self) {
         info!("Session {} started", self.id);
         while let Some(msg) = self.inbox.recv().await {
@@ -137,19 +171,111 @@ impl RobotSession {
             }
         };
 
-        let plan_res = self.decision_engine.decide(&self.persona, &event).await;
+        let plan_res = self.decision_engine.decide(&self.persona, &event, &*self.mcp_client).await;
         match plan_res {
             Ok(plan) => {
                 info!("Plan decided for session {}: {:?}", self.id, plan);
 
                 let mut ctx = crate::utils::Context::new(
                     (*self.persona).clone(),
-                    input_text,
+                    input_text.clone(),
                     Some(self.id.clone()),
                 );
 
                 for spec in plan.steps {
                     info!("workflow step start: {:?}", spec);
+
+                    let (is_bg, task_name, task_args) = match &spec {
+                        crate::utils::StepSpec::Tool { name, args, is_background } => {
+                            (*is_background, name.clone(), Some(args.clone()))
+                        }
+                        _ => (false, "background_task".to_string(), None),
+                    };
+
+                    if is_bg {
+                        info!("Spawning background task for step: {:?}", spec);
+                        let step = crate::workflow_steps::build_step(
+                            &spec,
+                            self.workflow_engine.resolver.clone(),
+                        );
+                        
+                        // Clone dependencies for background task
+                        let mut ctx_clone = ctx.clone();
+                        let mcp_client = self.mcp_client.clone();
+                        let output_handlers = self.output_handlers.clone();
+                        let target_ids_clone = target_ids.clone();
+                        let session_id = self.id.clone();
+                        let event_source = event.source.clone();
+                        let task_manager = self.task_manager.clone();
+                        
+                        let task_id = Uuid::new_v4().to_string();
+                        let task_id_clone = task_id.clone();
+                        let original_prompt = match &task_args {
+                            Some(args) => {
+                                let args_str = args.to_string();
+                                if args_str == "null" || args_str == "{}" || args_str == "[]" {
+                                    input_text.clone()
+                                } else {
+                                    format!("{} | args={}", input_text, args_str)
+                                }
+                            }
+                            None => input_text.clone(),
+                        };
+
+                        let handle = tokio::spawn(async move {
+                            let res = step.run(&mut ctx_clone, &*mcp_client).await;
+                             match res {
+                                Ok(res) => {
+                                    if let Some(mut o) = res.output {
+                                        o.source = event_source;
+                                        if o.session_id.is_none() {
+                                            o.session_id = Some(session_id);
+                                        }
+
+                                        // Dispatch output
+                                        let handlers_guard = output_handlers.read().await;
+                                        let futures = target_ids_clone
+                                            .iter()
+                                            .filter_map(|handler_id| handlers_guard.get(handler_id))
+                                            .map(|handler| handler.emit(o.clone()))
+                                            .collect::<Vec<_>>();
+                                        futures::future::join_all(futures).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Error executing background workflow step: {}", e);
+                                }
+                            }
+                            // Remove task from manager upon completion
+                            task_manager.remove_task(&task_id_clone).await;
+                        });
+                        
+                        self
+                            .task_manager
+                            .add_task(task_id.clone(), task_name.clone(), original_prompt, handle)
+                            .await;
+                        
+                        // Notify user that background task started
+                        let output = OutputEvent {
+                            target: "default".into(),
+                            source: event.source.clone(),
+                            session_id: Some(self.id.clone()),
+                            content: serde_json::json!({
+                                "type": "text",
+                                "text": format!("Started background task '{}' (ID: {})", task_name, task_id)
+                            }),
+                            style: OutputStyle::Neutral,
+                        };
+                        let handlers_guard = self.output_handlers.read().await;
+                        for handler_id in &target_ids {
+                            if let Some(handler) = handlers_guard.get(handler_id) {
+                                let _ = handler.emit(output.clone()).await;
+                            }
+                        }
+                        
+                        continue;
+                    }
+
                     let step = crate::workflow_steps::build_step(
                         &spec,
                         self.workflow_engine.resolver.clone(),
@@ -291,17 +417,24 @@ impl SessionManager {
         match (self.factory)(session_id.clone()).await {
             Ok(mcp_client) => {
                 let (tx, rx) = mpsc::unbounded_channel();
+
+                let task_manager = Arc::new(TaskManager::new());
+                let aware_client: Arc<dyn MCPClient + Send + Sync> = Arc::new(TaskAwareMcpClient::new(mcp_client, task_manager.clone()));
+                let decision_engine = self.decision_engine.clone();
+                let workflow_engine = self.workflow_engine.clone();
+
                 let session = RobotSession {
                     id: session_id.clone(),
                     inbox: rx,
-                    mcp_client,
-                    decision_engine: self.decision_engine.clone(),
-                    workflow_engine: self.workflow_engine.clone(),
+                    mcp_client: aware_client,
+                    decision_engine,
+                    workflow_engine,
                     perception_module: self.perception_module.clone(),
                     intent_module: self.intent_module.clone(),
                     persona: self.persona.clone(),
                     output_handlers: self.output_handlers.clone(),
                     router: self.router.clone(),
+                    task_manager,
                 };
 
                 // Spawn session actor

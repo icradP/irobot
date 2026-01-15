@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct ToolMeta {
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub is_long_running: bool,
 }
 
 #[derive(Default)]

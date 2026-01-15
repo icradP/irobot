@@ -1,5 +1,6 @@
 use crate::tools::ToolEntry;
 use crate::tools::to_object;
+use uuid::Uuid;
 use rmcp::{
     ErrorData,
     model::*,
@@ -17,8 +18,6 @@ pub struct LongTermTestRequest {
     pub count: u32,
     #[schemars(description = "Delay per step in ms")]
     pub delay_ms: Option<u64>,
-    #[schemars(description = "Progress token to use")]
-    pub progress_token: Option<String>,
 }
 
 impl rmcp::service::ElicitationSafe for LongTermTestRequest {}
@@ -30,14 +29,15 @@ pub struct LongTermTestElicitation {
     pub count: Option<u32>,
     #[schemars(description = "Delay per step in ms")]
     pub delay_ms: Option<u64>,
-    #[schemars(description = "Progress token to use")]
-    pub progress_token: Option<String>,
 }
 
 impl rmcp::service::ElicitationSafe for LongTermTestElicitation {}
 
 pub fn tool() -> ToolEntry {
     let schema = schemars::schema_for!(LongTermTestRequest);
+    let mut meta_map = serde_json::Map::new();
+    meta_map.insert("isLongRunning".to_string(), serde_json::Value::Bool(true));
+    
     let tool = Tool {
         name: "long_term_test".into(),
         title: Some("Long Term Test".into()),
@@ -46,7 +46,7 @@ pub fn tool() -> ToolEntry {
         output_schema: None,
         annotations: None,
         icons: None,
-        meta: None,
+        meta: Some(Meta(meta_map)), 
     };
     ToolEntry {
         name: "long_term_test",
@@ -61,7 +61,6 @@ pub async fn handle(
 ) -> Result<CallToolResult, ErrorData> {
     let mut count: Option<u32> = None;
     let mut delay_ms: Option<u64> = None;
-    let mut progress_token: Option<String> = None;
     let mut max_attempts: usize = 5;
 
     if let Some(args) = request {
@@ -75,7 +74,6 @@ pub async fn handle(
         if let Ok(parsed) = serde_json::from_value::<LongTermTestRequest>(args.clone()) {
             count = Some(parsed.count);
             delay_ms = parsed.delay_ms;
-            progress_token = parsed.progress_token;
         } else {
             // Manual parsing if full struct parsing fails
             if let Some(c) = args.get("count").and_then(|v| v.as_u64()) {
@@ -83,9 +81,6 @@ pub async fn handle(
             }
             if let Some(d) = args.get("delay_ms").and_then(|v| v.as_u64()) {
                 delay_ms = Some(d);
-            }
-            if let Some(t) = args.get("progress_token").and_then(|v| v.as_str()) {
-                progress_token = Some(t.to_string());
             }
         }
     }
@@ -100,11 +95,8 @@ pub async fn handle(
 
         if let Some(c) = count {
             let delay = delay_ms.unwrap_or(1000);
-            let token = progress_token.clone().unwrap_or_else(|| "long_term_test_progress".to_string());
-            let token_val = match token.parse::<i64>() {
-                Ok(n) => NumberOrString::Number(n),
-                Err(_) => NumberOrString::String(token.into()),
-            };
+            let token = uuid::Uuid::new_v4().to_string();
+            let token_val = NumberOrString::String(token.into());
 
             for i in 1..=c {
                 if context.ct.is_cancelled() {
@@ -139,9 +131,6 @@ pub async fn handle(
                 }
                 if let Some(d) = params.delay_ms {
                     delay_ms = Some(d);
-                }
-                if let Some(t) = params.progress_token {
-                    progress_token = Some(t);
                 }
                 prompt = "请提供长任务的执行步数".to_string();
             }

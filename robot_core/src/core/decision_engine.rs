@@ -9,7 +9,7 @@ use tracing::info;
 
 #[async_trait]
 pub trait DecisionEngine {
-    async fn decide(&self, persona: &Persona, input: &InputEvent) -> anyhow::Result<WorkflowPlan>;
+    async fn decide(&self, persona: &Persona, input: &InputEvent, mcp_client: &dyn MCPClient) -> anyhow::Result<WorkflowPlan>;
 }
 
 pub struct BasicDecisionEngine;
@@ -20,6 +20,7 @@ impl DecisionEngine for BasicDecisionEngine {
         &self,
         _persona: &Persona,
         _input: &InputEvent,
+        _mcp_client: &dyn MCPClient,
     ) -> anyhow::Result<WorkflowPlan> {
         let plan = WorkflowPlan {
             steps: vec![StepSpec::Memory, StepSpec::Profile, StepSpec::Relationship],
@@ -34,23 +35,21 @@ use std::sync::Arc;
 pub struct LLMDecisionEngine {
     pub llm: Box<dyn LLMClient + Send + Sync>,
     pub model: String,
-    pub mcp: Arc<dyn MCPClient + Send + Sync>,
 }
 
 impl LLMDecisionEngine {
     pub fn new(
         llm: Box<dyn LLMClient + Send + Sync>,
         model: String,
-        mcp: Arc<dyn MCPClient + Send + Sync>,
     ) -> Self {
-        Self { llm, model, mcp }
+        Self { llm, model }
     }
 }
 
 #[async_trait]
 impl DecisionEngine for LLMDecisionEngine {
-    async fn decide(&self, _persona: &Persona, input: &InputEvent) -> anyhow::Result<WorkflowPlan> {
-        let tools: Vec<ToolMeta> = self.mcp.list_tools().await.unwrap_or_default();
+    async fn decide(&self, _persona: &Persona, input: &InputEvent, mcp_client: &dyn MCPClient) -> anyhow::Result<WorkflowPlan> {
+        let tools: Vec<ToolMeta> = mcp_client.list_tools().await.unwrap_or_default();
         
         if tools.is_empty() {
             return Err(anyhow::anyhow!("NO_TOOLS_AVAILABLE"));
@@ -99,19 +98,21 @@ impl DecisionEngine for LLMDecisionEngine {
             Available Steps: [\"Memory\",\"Profile\",\"Relationship\"].\n\
             Available MCP Tools: {:?}.\n\
             \n\
-            Tool Categories:\n\
-            - [Conversational]: For natural language interaction, chat, Q&A, and roleplay.\n\
-            - [Utility]: For specific calculations, data processing, testing, or system operations.\n\
-            - [Memory]: For storing and recalling long-term information.\n\
-            - [Profile]: For managing user profiles and preferences.\n\
-            \n\
-            Rules:\n\
-            1. Analyze the user's intent and match it to the appropriate Tool Category.\n\
-            2. If the user's input is casual conversation (greeting, small talk, general questions), prioritize [Conversational] tools.\n\
-            3. Use [Utility] tools ONLY when the user explicitly requests that specific functionality (e.g., math, echo).\n\
-            4. Use [Memory] or [Profile] tools if the request involves remembering facts or accessing user data.\n\
-            5. Choose ONLY the necessary tools. Avoid redundant steps.\n\
-            6. Return a pure JSON array of strings representing the sequence of steps. No explanation.",
+            Tool Categories:
+            - [Conversational]: For natural language interaction, chat, Q&A, and roleplay.
+            - [Utility]: For specific calculations, data processing, testing, or system operations.
+            - [Memory]: For storing and recalling long-term information.
+            - [Profile]: For managing user profiles and preferences.
+            - [System]: For background task management (listing, cancelling).
+            
+            Rules:
+            1. Analyze the user's intent and match it to the appropriate Tool Category.
+            2. If the user's input is casual conversation (greeting, small talk, general questions), prioritize [Conversational] tools.
+            3. Use [Utility] tools ONLY when the user explicitly requests that specific functionality (e.g., math, echo).
+            4. Use [Memory] or [Profile] tools if the request involves remembering facts or accessing user data.
+            5. For task cancellation, you MUST include \"list_running_tasks\" BEFORE \"cancel_task\" in the sequence to identify the correct task ID.
+            6. Choose ONLY the necessary tools. Avoid redundant steps.
+            7. Return a pure JSON array of strings representing the sequence of steps. No explanation.",
             source_context, tool_descriptions
         );
         let user = format!("Input: {}\nReturn steps:", text);
@@ -147,7 +148,16 @@ impl DecisionEngine for LLMDecisionEngine {
             } else if lower == "relationship" {
                 steps.push(StepSpec::Relationship);
             } else {
-                steps.push(StepSpec::Tool { name: n, args });
+                let is_background = tools
+                    .iter()
+                    .find(|t| t.name == n)
+                    .map(|t| t.is_long_running)
+                    .unwrap_or(false);
+                steps.push(StepSpec::Tool {
+                    name: n,
+                    args,
+                    is_background,
+                });
             }
         }
         let plan = WorkflowPlan { steps };

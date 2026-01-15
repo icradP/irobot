@@ -357,6 +357,38 @@ impl RmcpStdIoClient {
         Ok(handler.serve(stream).await?)
     }
 
+    async fn connect_new(&self) -> anyhow::Result<RunningService<RoleClient, RobotClientHandler>> {
+        tracing::info!(
+            "Creating NEW connection to MCP server at: {} for session {}",
+            self.server_addr,
+            self.session_id
+        );
+        let stream = tokio::net::TcpStream::connect(&self.server_addr).await?;
+        
+        let client_info = ClientInfo {
+            protocol_version: Default::default(),
+            capabilities: ClientCapabilities::builder()
+                .enable_elicitation()
+                .enable_roots()
+                .build(),
+            client_info: Implementation {
+                name: format!("robot-core-client-{}-bg", self.session_id),
+                title: None,
+                version: "0.1.0".to_string(),
+                website_url: None,
+                icons: None,
+            },
+        };
+        let handler = RobotClientHandler {
+            info: client_info,
+            shared: self.shared.clone(),
+            llm: self.llm.clone(),
+            model: self.model.clone(),
+            session_id: self.session_id.clone(),
+        };
+        Ok(handler.serve(stream).await?)
+    }
+
     async fn ensure_connected(&self) -> anyhow::Result<()> {
         {
             let guard = self.service.lock().await;
@@ -503,11 +535,57 @@ impl MCPClient for RmcpStdIoClient {
         };
 
         let tool_name = tool.to_string();
+
+        // Check if this is a background/parallel task (marked by metadata)
+        let is_parallel = {
+            let tools = self.list_tools().await.unwrap_or_default();
+            tools.iter().any(|t| t.name == tool && t.is_long_running)
+        };
+
+        if is_parallel {
+            tracing::info!("RmcpStdIoClient: Detected parallel tool '{}', creating dedicated connection", tool);
+            let service = self.connect_new().await?;
+            let request = ClientRequest::CallToolRequest(CallToolRequest {
+                method: Default::default(),
+                params: CallToolRequestParam {
+                    name: tool_name.clone().into(),
+                    arguments: arguments.clone(),
+                },
+                extensions: Default::default(),
+            });
+            // Parallel execution does not use shared lock for request ID tracking
+            let handle = service
+                .send_cancellable_request(request, PeerRequestOptions::no_options())
+                .await?;
+            
+            let response = match handle.await_response().await {
+                Ok(r) => r,
+                Err(ServiceError::Cancelled { reason }) => {
+                    let msg = format!(
+                        "tool_cancel\nname={}\nmessage={}",
+                        tool_name,
+                        reason.unwrap_or_else(|| "用户取消了本次工具调用".to_string())
+                    );
+                    return Ok(serde_json::to_value(rmcp::model::CallToolResult::success(vec![
+                        rmcp::model::Content::text(msg),
+                    ]))?);
+                }
+                Err(e) => return Err(anyhow::anyhow!(e)),
+            };
+
+            let result = match response {
+                ServerResult::CallToolResult(r) => r,
+                _ => return Err(anyhow::anyhow!("Unexpected response")),
+            };
+            return Ok(serde_json::to_value(result)?);
+        }
+
         let shared = self.shared.clone();
+        let tool_name_clone = tool_name.clone();
         let result: rmcp::model::CallToolResult = match self
             .with_service_retry("call_tool", move |svc| {
                 let arguments = arguments.clone();
-                let tool_name = tool_name.clone();
+                let tool_name = tool_name_clone.clone();
                 let shared = shared.clone();
                 Box::pin(async move {
                     let request = ClientRequest::CallToolRequest(CallToolRequest {
@@ -577,9 +655,19 @@ impl MCPClient for RmcpStdIoClient {
             .await?;
         let metas = tools
             .into_iter()
-            .map(|t| ToolMeta {
-                name: t.name.to_string(),
-                description: t.description.unwrap_or_default().to_string(),
+            .map(|t| {
+                let description = t.description.unwrap_or_default().to_string();
+                let is_long_running = t
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("isLongRunning"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                ToolMeta {
+                    name: t.name.to_string(),
+                    description,
+                    is_long_running,
+                }
             })
             .collect();
         Ok(metas)

@@ -21,3 +21,4 @@ chrono = "0.4.42"
 hyper-rustls = { version = "0.27.2", features = ["http1", "native-tokio"] }
 futures = "0.3.31"
 toml = "0.8.19"
+uuid = {version = "1.19.0" ,features = ["v4"]}

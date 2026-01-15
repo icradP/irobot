@@ -26,3 +26,4 @@ bytes = "1.11.0"
 tower-http = { version = "0.6.3", features = ["cors"] }
 md-5 = "0.10"
 hex = "0.4"
+chrono = { version = "0.4.42", features = ["serde"] }

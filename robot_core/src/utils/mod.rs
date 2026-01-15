@@ -73,17 +73,22 @@ impl Context {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowPlan {
     pub steps: Vec<StepSpec>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StepSpec {
     Memory,
     Profile,
     Relationship,
-    Tool { name: String, args: Value },
+    Tool {
+        name: String,
+        args: Value,
+        #[serde(default)]
+        is_background: bool,
+    },
 }
 
 static EVENT_BUS_SENDER: OnceLock<broadcast::Sender<InputEvent>> = OnceLock::new();

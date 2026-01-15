@@ -30,18 +30,13 @@ async fn main() -> anyhow::Result<()> {
     let llm_for_decision = LMStudioClient::new(url.clone(), api_key.clone());
 
     // Create MCP client for decision engine (system session)
-    let mcp_client = Arc::new(
-        RmcpStdIoClient::new(
-            Arc::new(llm_for_decision.clone()),
-            model.clone(),
-            "system".to_string(),
-        )
-        .await?,
-    );
+    // Note: LLMDecisionEngine no longer holds mcp_client, it receives it at runtime from the session.
+    // However, for testing or system-level decisions outside a session, we might need one?
+    // But currently DecisionEngine is only used within RobotSession.
+    
     let decision = Box::new(LLMDecisionEngine::new(
         Box::new(llm_for_decision.clone()),
         model.clone(),
-        mcp_client.clone(),
     ));
 
     let perception = Box::new(BasicPerceptionModule);

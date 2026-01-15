@@ -8,6 +8,7 @@ pub mod router;
 pub mod session;
 pub mod sessions;
 pub mod workflow_engine;
+pub mod tasks;
 
 use crate::core::decision_engine::DecisionEngine;
 use crate::core::input_handler::InputHandler;
