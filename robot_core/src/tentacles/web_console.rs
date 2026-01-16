@@ -314,7 +314,7 @@ async fn send_message(
             "timestamp": message.timestamp,
             "files": message.files
         }),
-        style: OutputStyle::Neutral,
+        style: OutputStyle::Neutral.to_string(),
     };
     let _ = crate::utils::output_bus().send(output_echo);
 

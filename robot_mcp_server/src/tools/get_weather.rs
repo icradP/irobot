@@ -187,6 +187,8 @@ pub async fn handle(
     let location = raw["location"]["name"].as_str().unwrap_or("Unknown");
     let region = raw["location"]["region"].as_str().unwrap_or("");
     let country = raw["location"]["country"].as_str().unwrap_or("");
+    //可以用来查询对应的时间
+    let localtime = raw["location"]["localtime"].as_str().unwrap_or("");
 
     let current = &raw["current"];
     let temp_c = current["temp_c"].as_f64().unwrap_or(0.0);

@@ -9,6 +9,7 @@ class ChatClient {
 
         this.sessionId = null;
         this.isBroadcastMode = false;
+        this.showThinking = true;
         this.sessions = [];
         this.sessionMessages = {};
         this.activeProgressBars = {};
@@ -42,6 +43,7 @@ class ChatClient {
         this.serverHostInput = document.getElementById('serverHost');
         this.saveSettingsBtn = document.getElementById('saveSettings');
         this.broadcastModeInput = document.getElementById('broadcastMode');
+        this.showThinkingInput = document.getElementById('showThinking');
         this.sessionIdDisplay = document.getElementById('sessionIdDisplay');
         
         // Sidebar elements
@@ -322,6 +324,10 @@ class ChatClient {
             if (msg.type === 'user') {
                  if (msg.isOther) this.displayOtherUserMessage(msg.content, msg.files, false);
                  else this.displayUserMessage(msg.content, msg.files, false);
+            } else if (msg.type === 'think') {
+                 if (this.showThinking) {
+                     this.displayThinkMessage(msg.content, false);
+                 }
             } else {
                  this.displayBotMessage(msg.content, false);
             }
@@ -366,6 +372,7 @@ class ChatClient {
             this.outputPort = parsed.outputPort || 8081;
             this.serverHost = parsed.serverHost || 'localhost';
             this.isBroadcastMode = parsed.isBroadcastMode || false;
+            this.showThinking = parsed.showThinking !== undefined ? parsed.showThinking : true;
             // if (parsed.sessionId) {
             //     this.sessionId = parsed.sessionId;
             // }
@@ -376,6 +383,7 @@ class ChatClient {
         this.outputPortInput.value = this.outputPort;
         this.serverHostInput.value = this.serverHost;
         this.broadcastModeInput.checked = this.isBroadcastMode;
+        this.showThinkingInput.checked = this.showThinking;
         if (this.sessionId) {
             this.sessionIdDisplay.textContent = this.sessionId;
         }
@@ -386,12 +394,14 @@ class ChatClient {
         this.outputPort = parseInt(this.outputPortInput.value) || 8081;
         this.serverHost = this.serverHostInput.value || 'localhost';
         this.isBroadcastMode = this.broadcastModeInput.checked;
+        this.showThinking = this.showThinkingInput.checked;
 
         const settings = {
             inputPort: this.inputPort,
             outputPort: this.outputPort,
             serverHost: this.serverHost,
             isBroadcastMode: this.isBroadcastMode,
+            showThinking: this.showThinking,
             // sessionId: this.sessionId // Don't save session ID to ensure fresh one on reload
         };
         localStorage.setItem('chatSettings', JSON.stringify(settings));
@@ -563,10 +573,58 @@ class ChatClient {
             // System/Bot message
             if (message.content && message.content.type === 'progress') {
                 this.updateProgress(message.content);
+            } else if (message.content && message.content.type === 'think') {
+                if (this.showThinking) {
+                    this.displayThinkMessage(message.content.content);
+                }
             } else {
                 this.displayBotMessage(message);
             }
         }
+    }
+
+    displayThinkMessage(content, save = true) {
+        if (!content) return;
+        
+        if (save) {
+            if (!this.sessionMessages[this.sessionId]) this.sessionMessages[this.sessionId] = [];
+            this.sessionMessages[this.sessionId].push({
+                type: 'think', content: content, timestamp: Date.now()
+            });
+            this.saveState();
+        }
+
+        const msgDiv = document.createElement('div');
+        msgDiv.className = 'message bot-message';
+        
+        const innerDiv = document.createElement('div');
+        innerDiv.className = 'message-inner';
+
+        // Avatar (Bot)
+        const avatarDiv = document.createElement('div');
+        avatarDiv.className = 'message-avatar';
+        avatarDiv.innerHTML = `<svg stroke="currentColor" fill="none" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" height="1.5em" width="1.5em" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>`;
+
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        
+        const thinkBlock = document.createElement('div');
+        thinkBlock.className = 'think-content';
+        // Render markdown for think content if possible, or just text
+        if (typeof content === 'string' && window.marked && window.DOMPurify) {
+             const html = window.marked.parse(content || '');
+             thinkBlock.innerHTML = `<div class="think-header">Thinking Process</div>` + window.DOMPurify.sanitize(html);
+        } else {
+             thinkBlock.innerHTML = `<div class="think-header">Thinking Process</div>` + content;
+        }
+        
+        contentDiv.appendChild(thinkBlock);
+        innerDiv.appendChild(avatarDiv);
+        innerDiv.appendChild(contentDiv);
+        msgDiv.appendChild(innerDiv);
+        
+        this.chatMessages.appendChild(msgDiv);
+        this.scrollToBottom();
     }
 
     updateProgress(data) {

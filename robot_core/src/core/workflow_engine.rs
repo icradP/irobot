@@ -30,9 +30,25 @@ impl WorkflowEngine {
         input_source: String,
     ) -> anyhow::Result<()> {
         let mut ctx = crate::utils::Context::new(persona.clone(), input_text, None);
-        for spec in plan.steps {
+        
+        // Initialize workflow context in memory
+        ctx.memory = serde_json::json!({
+            "workflow": {
+                "plan": plan.clone(),
+                "current_step_index": 0
+            }
+        });
+        
+        for (i, spec) in plan.steps.iter().enumerate() {
+            // Update current step index in memory
+            if let Some(workflow) = ctx.memory.get_mut("workflow") {
+                 if let Some(obj) = workflow.as_object_mut() {
+                     obj.insert("current_step_index".to_string(), serde_json::json!(i));
+                 }
+            }
+
             info!("workflow step start: {:?}", spec);
-            let step = build_step(&spec, self.resolver.clone());
+            let step = build_step(spec, self.resolver.clone());
             let res: StepResult = step.run(&mut ctx, mcp).await?;
             if let Some(mut o) = res.output {
                 o.source = input_source.clone();

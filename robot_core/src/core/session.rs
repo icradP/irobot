@@ -202,11 +202,19 @@ impl RobotSession {
             Ok(plan) => {
                 info!("Plan decided for session {}: {:?}", self.id, plan);
 
-                let ctx = crate::utils::Context::new(
+                let mut ctx = crate::utils::Context::new(
                     (*self.persona).clone(),
                     input_text.clone(),
                     Some(self.id.clone()),
                 );
+                
+                // Initialize workflow context in memory
+                ctx.memory = serde_json::json!({
+                    "workflow": {
+                        "plan": plan.clone(),
+                        "current_step_index": 0
+                    }
+                });
                 
                 self.execute_workflow(plan.steps, 0, ctx, target_ids, event.source).await;
             }
@@ -245,10 +253,17 @@ impl RobotSession {
         event_source: String,
     ) {
         for (i, spec) in steps.iter().enumerate().skip(start_idx) {
+            // Update current step index in memory
+            if let Some(workflow) = ctx.memory.get_mut("workflow") {
+                 if let Some(obj) = workflow.as_object_mut() {
+                     obj.insert("current_step_index".to_string(), serde_json::json!(i));
+                 }
+            }
+
             info!("workflow step start: {:?}", spec);
 
             let (is_bg, task_name, task_args) = match &spec {
-                crate::utils::StepSpec::Tool { name, args, is_background } => {
+                crate::utils::StepSpec::Tool { name, args, is_background, dependencies: _ } => {
                     (*is_background, name.clone(), Some(args.clone()))
                 }
                 _ => (false, "background_task".to_string(), None),
@@ -327,7 +342,7 @@ impl RobotSession {
                         "type": "text",
                         "text": format!("Started background task '{}' (ID: {})", task_name, task_id)
                     }),
-                    style: OutputStyle::Neutral,
+                    style: self.persona.style.clone(),
                 };
                 let handlers_guard = self.output_handlers.read().await;
                 for handler_id in &target_ids {

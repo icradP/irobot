@@ -10,6 +10,8 @@
     --other-user-msg-bg: #2d2d35;
     --accent-color: #10a37f;
     --hover-color: #2a2b32;
+    --think-bg: #3e3f4b;
+    --think-border: #565869;
 }
 
 * {
@@ -258,6 +260,29 @@ body {
 
 .message-content code {
     font-family: 'Söhne Mono', Monaco, Andale Mono, Ubuntu Mono, monospace;
+}
+
+/* Think/Reasoning Block */
+.think-content {
+    margin-bottom: 1rem;
+    padding: 0.75rem 1rem;
+    background-color: var(--think-bg);
+    border-left: 4px solid var(--think-border);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-style: italic;
+    white-space: pre-wrap;
+}
+
+.think-header {
+    font-weight: 600;
+    font-style: normal;
+    font-size: 0.8rem;
+    margin-bottom: 0.5rem;
+    opacity: 0.8;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
 }
 
 /* Input Area */

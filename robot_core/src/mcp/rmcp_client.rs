@@ -87,7 +87,7 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                     "total": params.total,
                     "message": params.message
                 }),
-                style: OutputStyle::Neutral,
+                style: OutputStyle::Neutral.to_string(),
             };
             if let Err(e) = output_bus().send(output_event) {
                 eprintln!("[mcp_client] Failed to send progress output event: {}", e);
@@ -129,7 +129,7 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                     "message": request.message,
                     "schema": request.requested_schema
                 }),
-                style: OutputStyle::Neutral,
+                style: OutputStyle::Neutral.to_string(),
             };
 
             if let Err(e) = output_bus().send(output_event) {
@@ -167,7 +167,7 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                         "type": "tool_cancel",
                         "message": "已取消本次工具调用"
                     }),
-                    style: OutputStyle::Neutral,
+                    style: OutputStyle::Neutral.to_string() ,
                 };
                 let _ = output_bus().send(output_event);
                 let request_id = {
@@ -229,6 +229,7 @@ impl rmcp::handler::client::ClientHandler for RobotClientHandler {
                             },
                         ],
                         temperature: Some(0.1),
+                        session_id: Some(self.session_id.clone()),
                     };
 
                     match self.llm.chat(req).await {
@@ -750,6 +751,7 @@ mod tests {
         async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatOutput> {
             Ok(ChatOutput {
                 text: "{}".to_string(),
+                thought: None,
                 raw: serde_json::Value::Object(serde_json::Map::new()),
             })
         }

@@ -197,7 +197,7 @@ pub async fn handle(
                 if let Some(p) = params.port { port = Some(p); }
                 if let Some(p) = params.channel { channel = Some(p); }
                 if let Some(p) = params.imei { imei = Some(p); }
-                prompt = format!("检查参数...缺少: {}", missing_params.join(", "));
+                prompt = format!("检查参数...重新补充: {}", missing_params.join(", "));
             }
             Ok(None) => {
                  prompt = "未获得输入，请重新输入".to_string();

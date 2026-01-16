@@ -21,7 +21,7 @@ pub struct OutputEvent {
     pub source: String, // Track which input source this output is for
     pub session_id: Option<String>,
     pub content: Value,
-    pub style: OutputStyle,
+    pub style: String,
 }
 
 impl OutputEvent {
@@ -36,7 +36,7 @@ impl OutputEvent {
                 "profile": ctx.profile,
                 "relationships": ctx.relationships
             }),
-            style: ctx.persona.style.clone(),
+            style: ctx.persona.style.to_string(),
         }
     }
 }
@@ -76,6 +76,8 @@ impl Context {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowPlan {
     pub steps: Vec<StepSpec>,
+    #[serde(default)]
+    pub reasoning: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -88,6 +90,8 @@ pub enum StepSpec {
         args: Value,
         #[serde(default)]
         is_background: bool,
+        #[serde(default)]
+        dependencies: Vec<usize>, // Indices of steps this step depends on
     },
 }
 

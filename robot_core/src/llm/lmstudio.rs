@@ -42,9 +42,9 @@ impl LLMClient for LMStudioClient {
         if let Some(key) = &self.api_key {
             builder = builder.header("authorization", format!("Bearer {}", key));
         }
-        let req = builder.body(Full::new(Bytes::from(payload.to_string())))?;
+        let request = builder.body(Full::new(Bytes::from(payload.to_string())))?;
         info!("lmstudio request {}", endpoint);
-        let res: hyper::Response<Incoming> = client.request(req).await?;
+        let res: hyper::Response<Incoming> = client.request(request).await?;
         let status = res.status();
         let body_bytes = res.into_body().collect().await?.to_bytes();
         let raw: serde_json::Value = serde_json::from_slice(&body_bytes)?;
@@ -55,6 +55,54 @@ impl LLMClient for LMStudioClient {
             .as_str()
             .unwrap_or_default()
             .to_string();
-        Ok(ChatOutput { text, raw })
+        
+        let (mut clean_text, thought) = remove_think_tags(&text);
+        if clean_text.trim().is_empty() && !text.trim().is_empty() {
+            clean_text = text;
+        }
+
+        if let Some(thought_content) = &thought {
+            if let Some(sid) = &req.session_id {
+                let evt = crate::utils::OutputEvent {
+                    target: "default".into(),
+                    source: "llm".into(),
+                    session_id: Some(sid.clone()),
+                    content: serde_json::json!({
+                        "type": "think",
+                        "content": thought_content
+                    }),
+                    style: "neutral".to_string(),
+                };
+                 let _ = crate::utils::output_bus().send(evt);
+            }
+        }
+
+        Ok(ChatOutput { text: clean_text, thought, raw })
     }
+}
+
+fn remove_think_tags(text: &str) -> (String, Option<String>) {
+    let mut result = String::new();
+    let mut thought = String::new();
+    let mut remaining = text;
+    let mut has_thought = false;
+    
+    while let Some(start_idx) = remaining.find("<think>") {
+        result.push_str(&remaining[..start_idx]);
+        if let Some(end_idx) = remaining[start_idx..].find("</think>") {
+             let t_slice = &remaining[start_idx..][7..end_idx];
+             thought.push_str(t_slice);
+             has_thought = true;
+             remaining = &remaining[start_idx + end_idx + 8..];
+        } else {
+             if remaining.len() > start_idx + 7 {
+                thought.push_str(&remaining[start_idx+7..]);
+                has_thought = true;
+             }
+             remaining = "";
+             break;
+        }
+    }
+    result.push_str(remaining);
+    (result, if has_thought { Some(thought) } else { None })
 }

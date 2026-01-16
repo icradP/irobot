@@ -41,7 +41,7 @@ impl IntentModule for LLMIntentModule {
     ) -> anyhow::Result<IntentDecision> {
         // The "Soul Question": Should I respond?
         let system_prompt = format!(
-            "You are an AI agent named '{}' with a {:?} style.\n\
+            "You named '{}' with a {:?} style.\n\
             \n\
             Perception of input:\n\
             Sentiment: {}\n\
@@ -80,6 +80,7 @@ impl IntentModule for LLMIntentModule {
                 },
             ],
             temperature: Some(0.1), // Deterministic
+            session_id: None, // Intent analysis is internal, usually no need to stream think?
         };
 
         let out = self.llm.chat(req).await?;

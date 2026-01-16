@@ -24,6 +24,7 @@ impl DecisionEngine for BasicDecisionEngine {
     ) -> anyhow::Result<WorkflowPlan> {
         let plan = WorkflowPlan {
             steps: vec![StepSpec::Memory, StepSpec::Profile, StepSpec::Relationship],
+            reasoning: None,
         };
         info!("decision_engine plan: {:?}", plan);
         Ok(plan)
@@ -59,10 +60,10 @@ impl DecisionEngine for LLMDecisionEngine {
         let tool_list: Vec<String> = tools.iter().enumerate()
             .map(|(idx, tool)| format!("[{}] name={} description={}", idx, tool.name, tool.description))
             .collect();
-        info!("DecisionEngine detected MCP tools:\n [{}]", tool_list.join("\n"));
+        info!("DecisionEngine detected MCP tools:\n[{}]", tool_list.join("\n"));
         let tool_descriptions: Vec<String> = tools
             .iter()
-            .map(|t| format!("{}: {}", t.name, t.description))
+            .map(|t| format!("name={} description={}", t.name, t.description))
             .collect();
 
         // Extract text based on source metadata or fallback to known patterns
@@ -95,7 +96,7 @@ impl DecisionEngine for LLMDecisionEngine {
 
         let system = format!(
             "{}You are a smart workflow planner. Your goal is to select the minimal and optimal set of tools to fulfill the user's request.\n\
-            Available Steps: [\"Memory\",\"Profile\",\"Relationship\"].\n\
+            Available Steps: [\"Memory\"].\n\
             Available MCP Tools: {:?}.\n\
             \n\
             Tool Categories:
@@ -112,7 +113,18 @@ impl DecisionEngine for LLMDecisionEngine {
             4. Use [Memory] or [Profile] tools if the request involves remembering facts or accessing user data.
             5. For task cancellation, you MUST include \"list_running_tasks\" BEFORE \"cancel_task\" in the sequence to identify the correct task ID.
             6. Choose ONLY the necessary tools. Avoid redundant steps.
-            7. Return a pure JSON array of strings representing the sequence of steps. No explanation.",
+            7. Perform multi-step reasoning. If a task requires the output of one tool to be used by another (e.g. \"calculate difference between A and B\"), include ALL necessary steps in logical order.
+            8. IMPORTANT: If the user asks for a comparison or calculation based on retrieved data (e.g. \"time difference\"), you MUST include the calculation tool (e.g., \"sub\", \"sum\") after the retrieval tools.
+            9. Return a JSON object with two fields: 'reasoning' (string) and 'steps' (array).
+            - 'reasoning': Explain why you selected these tools and how you plan to extract parameters.
+            - 'steps': The array of tool steps as described before. Each object must have 'tool' (string) and 'dependencies' (array of integers).
+            'dependencies' should contain the 0-based indices of previous steps that the current step depends on. If independent, use [].
+            Example:
+            {{
+              \"reasoning\": \"User wants to know time difference. I need to get current time twice (or user provided one?) and then subtract.\",
+              \"steps\": [{{ \"tool\": \"get_current_datetime\", \"dependencies\": [] }}, {{ \"tool\": \"get_current_datetime\", \"dependencies\": [] }}, {{ \"tool\": \"sub\", \"dependencies\": [0, 1] }}]
+            }}
+            No explanation.",
             source_context, tool_descriptions
         );
         let user = format!("Input: {}\nReturn steps:", text);
@@ -129,16 +141,66 @@ impl DecisionEngine for LLMDecisionEngine {
                 },
             ],
             temperature: Some(0.2),
+            session_id: input.session_id.clone(),
         };
         let out = self.llm.chat(req).await?;
+
         let s = out.text.trim();
-        let json_slice = match (s.find('['), s.rfind(']')) {
-            (Some(i), Some(j)) if j >= i => &s[i..=j],
-            _ => s,
-        };
-        let names: Vec<String> = serde_json::from_str(json_slice).unwrap_or_default();
+        let mut planner_reasoning = out.thought.clone();
+
+        #[derive(serde::Deserialize)]
+        struct StepItem {
+            tool: String,
+            dependencies: Vec<usize>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct PlanResponse {
+            reasoning: Option<String>,
+            steps: Vec<StepItem>,
+        }
+        
+        let mut step_items: Vec<StepItem> = Vec::new();
+
+        // 1. Try to parse as JSON Object (New Format)
+        let starts_obj: Vec<usize> = s.match_indices('{').map(|(i, _)| i).collect();
+        for start in starts_obj {
+            if let Some(end_offset) = s[start..].rfind('}') {
+                let end = start + end_offset;
+                let candidate = &s[start..=end];
+                if let Ok(resp) = serde_json::from_str::<PlanResponse>(candidate) {
+                    step_items = resp.steps;
+                    if let Some(r) = resp.reasoning {
+                        if !r.trim().is_empty() {
+                            planner_reasoning = Some(r);
+                        }
+                    }
+                    if !step_items.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 2. Fallback: Try to parse as JSON Array (Legacy Format)
+        if step_items.is_empty() {
+            let starts_arr: Vec<usize> = s.match_indices('[').map(|(i, _)| i).collect();
+            for start in starts_arr {
+                if let Some(end_offset) = s[start..].rfind(']') {
+                    let end = start + end_offset;
+                    let candidate = &s[start..=end];
+                    if let Ok(items) = serde_json::from_str::<Vec<StepItem>>(candidate) {
+                        step_items = items;
+                        break;
+                    }
+                }
+            }
+        }
+        
         let mut steps = Vec::new();
-        for n in names {
+        for item in step_items {
+            let n = item.tool;
+            let deps = item.dependencies;
             let args: Value = Value::Null;
             let lower = n.to_lowercase();
             if lower == "memory" {
@@ -157,10 +219,11 @@ impl DecisionEngine for LLMDecisionEngine {
                     name: n,
                     args,
                     is_background,
+                    dependencies: deps,
                 });
             }
         }
-        let plan = WorkflowPlan { steps };
+        let plan = WorkflowPlan { steps, reasoning: planner_reasoning };
         info!("llm decision plan: {:?}", plan);
         Ok(plan)
     }

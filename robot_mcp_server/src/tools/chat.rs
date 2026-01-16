@@ -220,7 +220,30 @@ pub async fn handle(
         .as_str()
         .unwrap_or_default()
         .to_string();
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+
+    // Use a simple remove_think_tags function here since this is a separate crate
+    fn remove_think_tags_simple(text: &str) -> String {
+        let mut result = String::new();
+        let mut remaining = text;
+        while let Some(start_idx) = remaining.find("<think>") {
+            result.push_str(&remaining[..start_idx]);
+            if let Some(end_idx) = remaining[start_idx..].find("</think>") {
+                 remaining = &remaining[start_idx + end_idx + 8..];
+            } else {
+                 remaining = "";
+                 break;
+            }
+        }
+        result.push_str(remaining);
+        result
+    }
+
+    let mut clean_text = remove_think_tags_simple(&text);
+    if clean_text.trim().is_empty() && !text.trim().is_empty() {
+        clean_text = text;
+    }
+
+    Ok(CallToolResult::success(vec![Content::text(clean_text)]))
 }
 
 // registration is embedded in tool()

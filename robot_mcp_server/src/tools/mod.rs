@@ -21,12 +21,15 @@ pub struct AppState {
 
 pub mod chat;
 pub mod echo;
+pub mod division;
 pub mod ffprobe;
+pub mod gpuinfo;
 pub mod pusher;
 pub mod get_current_datetime;
 pub mod get_weather;
 pub mod long_tern_test;
 pub mod profile;
+pub mod sub;
 pub mod sum;
 
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<CallToolResult, ErrorData>> + Send>>;
@@ -49,6 +52,9 @@ pub fn all_entries() -> Vec<ToolEntry> {
     vec![
         echo::tool(),
         sum::tool(),
+        sub::tool(),
+        division::tool(),
+        gpuinfo::tool(),
         profile::update_tool(),
         profile::get_tool(),
         chat::tool(),

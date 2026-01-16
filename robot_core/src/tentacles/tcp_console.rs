@@ -183,7 +183,7 @@ async fn handle_connection(
                                         .unwrap_or_default()
                                         .as_millis() as u64,
                                 }),
-                                style: OutputStyle::Neutral,
+                                style: OutputStyle::Neutral.to_string(),
                             };
                             let _ = crate::utils::output_bus().send(output_echo);
                             
